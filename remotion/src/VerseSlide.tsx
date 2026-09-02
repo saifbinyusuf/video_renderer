@@ -39,12 +39,12 @@ export const VerseSlide: React.FC<{ arabic: string; bengali: string }> = ({
         alignItems: "center",
       }}
     >
-      <div style={{ textAlign: "center", maxWidth: "70%" }}>
+      <div style={{ textAlign: "center", maxWidth: "60%" }}>
         <div
           style={{
             fontFamily: "ArabicFont",
-            fontSize: 70,
-            color: "#FFD700",
+            fontSize: 80,
+            color: "#00000",
             direction: "rtl",
             lineHeight: 1.6,
             textShadow: "2px 2px 6px rgba(0,0,0,0.75)",
@@ -55,9 +55,9 @@ export const VerseSlide: React.FC<{ arabic: string; bengali: string }> = ({
         <div
           style={{
             fontFamily: "BengaliFont",
-            fontSize: 55,
-            color: "#FFD700",
-            marginTop: 36,
+            fontSize: 60,
+            color: "#000000",
+            marginTop: 50,
             lineHeight: 1.5,
             textShadow: "2px 2px 6px rgba(0,0,0,0.75)",
           }}

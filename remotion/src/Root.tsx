@@ -1,6 +1,6 @@
 import React from "react";
 import { Composition } from "remotion";
-import { VerseSequence, VerseInput, TRANSITION_FRAMES } from "./VerseSequence";
+import { VerseSequence, VerseInput } from "./VerseSequence";
 
 const FPS = 30;
 const WIDTH = 1920;
@@ -14,12 +14,25 @@ export const RemotionRoot: React.FC = () => {
       fps={FPS}
       width={WIDTH}
       height={HEIGHT}
-      defaultProps={{ verses: [] as VerseInput[] }}
+      defaultProps={{
+        verses: [
+          {
+            verseKey: "1:1",
+            arabic: "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
+            bengali: "পরম করুণাময়, অসীম দয়ালু আল্লাহর নামে",
+            durationInFrames: 150,
+          },
+          {
+            verseKey: "1:2",
+            arabic: "الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ",
+            bengali: "যাবতীয় প্রশংসা জগতসমূহের রব আল্লাহরই জন্য",
+            durationInFrames: 150,
+          }
+        ] as VerseInput[]
+      }}
       calculateMetadata={({ props }) => {
         const verses = props.verses as VerseInput[];
-        const totalContent = verses.reduce((sum, v) => sum + v.durationInFrames, 0);
-        const totalTransitionOverlap = Math.max(verses.length - 1, 0) * TRANSITION_FRAMES;
-        const durationInFrames = Math.max(totalContent - totalTransitionOverlap, FPS);
+        const durationInFrames = Math.max(verses.reduce((sum, v) => sum + v.durationInFrames, 0), FPS);
         return { durationInFrames };
       }}
     />
