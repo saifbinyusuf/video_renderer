@@ -1,0 +1,10 @@
+services:
+  verse-renderer:
+    build: .
+    volumes:
+      - ./inputs:/app/inputs
+      - ./output:/app/output
+      - ./data:/app/data
+      - ./assets:/app/assets
+      - ./remotion/src:/app/remotion/src
+    tty: true
