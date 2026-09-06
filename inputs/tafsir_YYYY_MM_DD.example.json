@@ -1,0 +1,91 @@
+{
+  // =========================================================================
+  // BUET Mosque Tafseer Video Renderer - Input Configuration Template
+  // =========================================================================
+  //
+  // 1. FILE NAMING:
+  //    Name your weekly input file: inputs/tafsir_YYYY_MM_DD.json
+  //    (Example: inputs/tafsir_2026_09_02.json)
+  //
+  // 2. CRITICAL AUDIO TIMESTAMP SYNCHRONIZATION:
+  //    All verse "start" and "end" timestamps MUST be taken directly from
+  //    the main lecture speech audio file (inputs/*.mp3), measured in
+  //    seconds from the very beginning (00:00.000) of that audio file.
+  //    - Open the speech audio in Audacity, QuickTime, or VLC.
+  //    - Note the exact second when the speaker begins reciting the first verse.
+  //    - The first verse's "start" timestamp dynamically sets the duration
+  //      of the Scene 1 Intro Title Card, ensuring the slide transition into
+  //      the recitation slide occurs at the exact millisecond recitation begins.
+  //
+  // 3. TWO OPERATING MODES:
+  //    - "standard": Automatically fetches Arabic text & Bengali translation
+  //                  from data/quran_taisirul_bengali.json using "verse_key".
+  //    - "custom"  : Completely bypasses the database. You provide "arabic"
+  //                  and "bengali" text directly inside each verse object.
+  //                  Ideal for splitting long verses into parts for pauses.
+  // =========================================================================
+  // Mode Selection: "standard" or "custom"
+  "mode": "standard",
+  // Metadata displayed on the animated Scene 1 Intro Title Card
+  "intro": {
+    "title": "তাফসীরুল কুরআন",
+    "surah_name": "সূরা আলে-ইমরান",
+    "verse_range": "৪৭-৪৮",
+    "date": "২৬ আগস্ট ২০২৬",
+    "speaker": "মুফতি রাশেদুর রহমান"
+  },
+  // =========================================================================
+  // MODE 1: STANDARD MODE (ACTIVE EXAMPLE)
+  // =========================================================================
+  // In standard mode, only "verse_key", "start", and "end" are required.
+  // "verse_key" must match an entry in data/quran_taisirul_bengali.json (e.g. "3:47").
+  "verses": [
+    {
+      "verse_key": "3:47",
+      "start": 15.057,
+      "end": 31.700
+    },
+    {
+      "verse_key": "3:48",
+      "start": 31.700,
+      "end": 38.230
+    }
+  ],
+  // =========================================================================
+  // MODE 2: CUSTOM MODE (ALTERNATIVE EXAMPLE)
+  // =========================================================================
+  // To use Custom Mode:
+  // 1. Change "mode": "custom" above.
+  // 2. Replace the "verses" array above with the list below.
+  //
+  // Why use custom mode?
+  // - Splitting long verses: When the speaker pauses midway through a long
+  //   verse, you can split it into parts (e.g., "3:47 (১ম অংশ)" and "3:47 (২য় অংশ)")
+  //   so the on-screen text advances in sync with the recitation.
+  // - Custom wording: You want specific Bengali phrasing or transliteration.
+  //
+  // Below is the complete example of how "verses" is structured in custom mode:
+  "_custom_mode_example": [
+    {
+      "verse_key": "3:47 (১ম অংশ)",
+      "arabic": "قَالَتْ رَبِّ أَنَّىٰ يَكُونُ لِى وَلَدٌ وَلَمْ يَمْسَسْنِى بَشَرٌ",
+      "bengali": "মারইয়াম বলল, ‘হে আমার প্রতিপালক! কীভাবে আমার পুত্র হবে, অথচ আমাকে কোন মানব স্পর্শ করেনি’।",
+      "start": 15.057,
+      "end": 20.680
+    },
+    {
+      "verse_key": "3:47 (২য় অংশ)",
+      "arabic": "قَالَ كَذَٰلِكِ ٱللَّهُ يَخْلُقُ مَا يَشَآءُ ۚ إِذَا قَضَىٰٓ أَمْرًا فَإِنَّمَا يَقُولُ لَهُۥ كُن فَيَكُونُ",
+      "bengali": "তিনি বললেন, ‘এভাবেই’ আল্লাহ সৃজন করেন যা তিনি ইচ্ছে করেন, তিনি যখন কিছু স্থির করেন তখন বলেন, ‘‘হয়ে যাও’’ সুতরাং তা হয়ে যায়।",
+      "start": 20.680,
+      "end": 31.700
+    },
+    {
+      "verse_key": "3:48",
+      "arabic": "وَيُعَلِّمُهُ ٱلْكِتَـٰبَ وَٱلْحِكْمَةَ وَٱلتَّوْরَىٰةَ وَٱلْإِنجِيلَ",
+      "bengali": "আর তিনি তাকে কিতাব, হিকমাত, তাওরাত ও ইঞ্জিল শিক্ষা দেবেন।",
+      "start": 31.700,
+      "end": 38.230
+    }
+  ]
+}

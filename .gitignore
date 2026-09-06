@@ -4,6 +4,8 @@ __pycache__/
 .env
 .DS_Store
 output/
-inputs/
+inputs/*
+!inputs/*.example.json
+!inputs/*example*.json
 *.wav
 *.mp4

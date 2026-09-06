@@ -21,9 +21,12 @@ export const VerseSlide: React.FC<{ arabic: string; bengali: string }> = ({
         weight: "700",
       }),
       loadFont({
-        family: "BengaliFont",
+        family: "shokuntola",
+        url: staticFile("fonts/shokuntola.ttf"),
+      }),
+      loadFont({
+        family: "bengali",
         url: staticFile("fonts/bengali.ttf"),
-        weight: "700",
       }),
     ]).then(() => {
       fontsLoaded = true;
@@ -46,20 +49,20 @@ export const VerseSlide: React.FC<{ arabic: string; bengali: string }> = ({
             fontSize: 80,
             color: "#00000",
             direction: "rtl",
-            lineHeight: 1.6,
-            textShadow: "2px 2px 6px rgba(0,0,0,0.75)",
+            lineHeight: 1.5,
+            textShadow: "2px 2px 6px rgba(0,0,0,0.5)",
           }}
         >
           {arabic}
         </div>
         <div
           style={{
-            fontFamily: "BengaliFont",
+            fontFamily: "bengali",
             fontSize: 60,
             color: "#000000",
-            marginTop: 50,
+            marginTop: 30,
             lineHeight: 1.5,
-            textShadow: "2px 2px 6px rgba(0,0,0,0.75)",
+            textShadow: "2px 2px 6px rgba(0,0,0,0.5)",
           }}
         >
           {bengali}
