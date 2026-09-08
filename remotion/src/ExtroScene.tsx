@@ -10,6 +10,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { ExtroInviteSlide, ExtroVerseSlide } from "./ExtroSlide";
+import { ChannelWatermark } from "./ChannelWatermark";
 import introBg from "./intro_bg.png";
 import extroInviteAudio from "./extro_invite.mp3";
 import extroVerseAudio from "./extro_verse.mp3";
@@ -150,6 +151,9 @@ export const ExtroScene: React.FC = () => {
           }}
         />
       )}
+
+      {/* Persistent Channel Watermark (Top-most layer, 40% opacity) */}
+      <ChannelWatermark />
     </AbsoluteFill>
   );
 };

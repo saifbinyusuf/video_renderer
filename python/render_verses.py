@@ -10,6 +10,12 @@ FPS = 30
 SILENCE_DURATION = 1.5  # 1.5s silence after speech ends before extro begins
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 
+# Channel Watermark Controls (Bottom-Right Logo)
+CHANNEL_LOGO_WIDTH = 180
+CHANNEL_LOGO_OPACITY = 0.5
+CHANNEL_LOGO_RIGHT = 50
+CHANNEL_LOGO_BOTTOM = 40
+
 # Extro Audio Volume Controls (e.g. 1.0 = 100%, 0.8 = 80%, 1.2 = 120%)
 EXTRO_INVITE_VOLUME = 1.0
 EXTRO_VERSE_VOLUME = 0.3
@@ -87,7 +93,7 @@ def get_media_duration(path: Path) -> float:
 def load_verse_db(path=DATA_PATH):
     if not Path(path).exists():
         raise FileNotFoundError(
-            f"Quran database not found at {path}. If running in custom mode, the database is not needed."
+            print("[Warning] Quran database not found. If all verses use 'custom_text' mode, the database is not needed.")
         )
     with open(path, encoding="utf-8") as f:
         entries = json.load(f)
@@ -95,7 +101,12 @@ def load_verse_db(path=DATA_PATH):
 
 
 def build_props(tafsir_input, db=None):
-    mode = str(tafsir_input.get("mode", "standard")).strip().lower()
+    default_mode = str(tafsir_input.get("mode", "verse")).strip().lower()
+    if default_mode == "standard":
+        default_mode = "verse"
+    elif default_mode == "custom":
+        default_mode = "custom_text"
+
     items = tafsir_input.get("segments") or tafsir_input.get("verses", [])
 
     if not items:
@@ -122,23 +133,38 @@ def build_props(tafsir_input, db=None):
         if duration_sec <= 0:
             raise ValueError(f"Non-positive duration for item #{idx + 1}: {duration_sec}s")
 
+        # Per-verse mode resolution: "verse" (fetch from DB) or "custom_text" (take provided text)
+        item_mode = str(v.get("mode") or v.get("type") or "").strip().lower()
+        if item_mode in ("standard", "db", "quran"):
+            item_mode = "verse"
+        elif item_mode in ("custom", "text"):
+            item_mode = "custom_text"
+
         has_custom_text = (
             ("arabic" in v or "arabic_text" in v)
             and ("bengali" in v or "bengali_translation" in v or "translation" in v)
         )
 
-        if mode == "custom" or has_custom_text:
+        if not item_mode:
+            if has_custom_text:
+                item_mode = "custom_text"
+            elif "verse_key" in v or "verseKey" in v:
+                item_mode = "verse"
+            else:
+                item_mode = default_mode
+
+        if item_mode == "custom_text":
             arabic = v.get("arabic") or v.get("arabic_text")
             bengali = v.get("bengali") or v.get("bengali_translation") or v.get("translation")
             if not arabic:
-                raise ValueError(f"Custom item #{idx + 1} missing 'arabic' text.")
+                raise ValueError(f"Item #{idx + 1} ('custom_text' mode) missing 'arabic' text.")
             if not bengali:
-                raise ValueError(f"Custom item #{idx + 1} missing 'bengali' translation.")
+                raise ValueError(f"Item #{idx + 1} ('custom_text' mode) missing 'bengali' translation.")
             verse_key = v.get("verse_key") or v.get("verseKey") or v.get("label") or f"custom_{idx + 1}"
-        else:
+        elif item_mode == "verse":
             verse_key = v.get("verse_key") or v.get("verseKey")
             if not verse_key:
-                raise KeyError(f"Standard item #{idx + 1} missing 'verse_key'.")
+                raise KeyError(f"Item #{idx + 1} ('verse' mode) missing 'verse_key'.")
             if db is None:
                 db = load_verse_db()
             entry = db.get(verse_key)
@@ -146,6 +172,10 @@ def build_props(tafsir_input, db=None):
                 raise KeyError(f"Verse key not found in database: {verse_key}")
             arabic = entry["arabic_text"]
             bengali = entry["bengali_translation"]
+        else:
+            raise ValueError(
+                f"Item #{idx + 1} has unrecognized mode: '{item_mode}'. Must be 'verse' or 'custom_text'."
+            )
 
         verses.append({
             "verseKey": str(verse_key),
@@ -316,7 +346,8 @@ def render_speech_scene(
     intro_duration: float,
     speech_audio_remaining: float,
     speech_scene_duration: float,
-    out_path: Path
+    out_path: Path,
+    channel_logo_path: Path = None
 ):
     """Step 4: Render Scene 2 (Main Speech) using Option A Loop Stream-Copy.
     - Encodes Head (152 frames / ~5.07s) with fade-in and watermark fade
@@ -326,6 +357,15 @@ def render_speech_scene(
     - Muxes speech audio with silence padding in ~1.5 seconds
     Total render time: ~8 seconds (down from ~7.5 minutes).
     """
+    if channel_logo_path is None:
+        try:
+            channel_logo_path = find_asset("icb_logo.png")
+        except Exception:
+            channel_logo_path = None
+
+    has_logo = channel_logo_path is not None and channel_logo_path.exists()
+    logo_overlay_pos = f"W-w-{CHANNEL_LOGO_RIGHT}:H-h-{CHANNEL_LOGO_BOTTOM}"
+
     total_speech_frames = round(speech_scene_duration * FPS)
     loop_frames = get_video_frame_count(speech_bg_path)
     if loop_frames <= 0:
@@ -361,71 +401,133 @@ def render_speech_scene(
         scale_filter = f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps={FPS}"
 
         # 1. Head Segment (152 frames)
-        head_filter = (
-            f"[0:v]{scale_filter}[bg];"
-            f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
-            f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
-            f"[bg_faded][wm]overlay=0:0[outv]"
-        )
-        cmd_head = [
-            "ffmpeg", "-y",
-            "-i", str(speech_bg_path),
-            "-loop", "1",
-            "-i", str(watermark_path),
-            "-filter_complex", head_filter,
-            "-map", "[outv]",
-            "-vframes", str(head_frames),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-r", str(FPS),
-            "-video_track_timescale", "90000",
-            str(temp_head)
-        ]
+        if has_logo:
+            head_filter = (
+                f"[0:v]{scale_filter}[bg];"
+                f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
+                f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
+                f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+                f"[bg_faded][wm]overlay=0:0[bg_wm];"
+                f"[bg_wm][logo]overlay={logo_overlay_pos}[outv]"
+            )
+            cmd_head = [
+                "ffmpeg", "-y",
+                "-i", str(speech_bg_path),
+                "-loop", "1", "-i", str(watermark_path),
+                "-loop", "1", "-i", str(channel_logo_path),
+                "-filter_complex", head_filter,
+                "-map", "[outv]",
+                "-vframes", str(head_frames),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-r", str(FPS),
+                "-video_track_timescale", "90000",
+                str(temp_head)
+            ]
+        else:
+            head_filter = (
+                f"[0:v]{scale_filter}[bg];"
+                f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
+                f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
+                f"[bg_faded][wm]overlay=0:0[outv]"
+            )
+            cmd_head = [
+                "ffmpeg", "-y",
+                "-i", str(speech_bg_path),
+                "-loop", "1", "-i", str(watermark_path),
+                "-filter_complex", head_filter,
+                "-map", "[outv]",
+                "-vframes", str(head_frames),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-r", str(FPS),
+                "-video_track_timescale", "90000",
+                str(temp_head)
+            ]
         subprocess.run(cmd_head, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # 2. Body Unit (152 frames) - only if loops are needed
         if num_loops > 0:
-            body_filter = (
-                f"[0:v]{scale_filter}[bg];"
-                f"[bg][1:v]overlay=0:0[outv]"
-            )
-            cmd_body = [
-                "ffmpeg", "-y",
-                "-i", str(speech_bg_path),
-                "-loop", "1",
-                "-i", str(watermark_path),
-                "-filter_complex", body_filter,
-                "-map", "[outv]",
-                "-vframes", str(loop_frames),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", "-r", str(FPS),
-                "-video_track_timescale", "90000",
-                str(temp_body)
-            ]
+            if has_logo:
+                body_filter = (
+                    f"[0:v]{scale_filter}[bg];"
+                    f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+                    f"[bg][1:v]overlay=0:0[bg_wm];"
+                    f"[bg_wm][logo]overlay={logo_overlay_pos}[outv]"
+                )
+                cmd_body = [
+                    "ffmpeg", "-y",
+                    "-i", str(speech_bg_path),
+                    "-loop", "1", "-i", str(watermark_path),
+                    "-loop", "1", "-i", str(channel_logo_path),
+                    "-filter_complex", body_filter,
+                    "-map", "[outv]",
+                    "-vframes", str(loop_frames),
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-r", str(FPS),
+                    "-video_track_timescale", "90000",
+                    str(temp_body)
+                ]
+            else:
+                body_filter = (
+                    f"[0:v]{scale_filter}[bg];"
+                    f"[bg][1:v]overlay=0:0[outv]"
+                )
+                cmd_body = [
+                    "ffmpeg", "-y",
+                    "-i", str(speech_bg_path),
+                    "-loop", "1", "-i", str(watermark_path),
+                    "-filter_complex", body_filter,
+                    "-map", "[outv]",
+                    "-vframes", str(loop_frames),
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-r", str(FPS),
+                    "-video_track_timescale", "90000",
+                    str(temp_body)
+                ]
             subprocess.run(cmd_body, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # 3. Tail Segment (tail_frames) - with fade-out in final 30 frames (1.0s)
         if tail_frames > 0:
             tail_sec = tail_frames / float(FPS)
             tail_fade_st = max(0.0, tail_sec - 1.0)
-            tail_filter = (
-                f"[0:v]{scale_filter}[bg];"
-                f"[bg][1:v]overlay=0:0[with_wm];"
-                f"[with_wm]fade=t=out:st={tail_fade_st:.3f}:d=1.0[outv]"
-            )
-            cmd_tail = [
-                "ffmpeg", "-y",
-                "-stream_loop", "-1",
-                "-i", str(speech_bg_path),
-                "-loop", "1",
-                "-i", str(watermark_path),
-                "-filter_complex", tail_filter,
-                "-map", "[outv]",
-                "-vframes", str(tail_frames),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", "-r", str(FPS),
-                "-video_track_timescale", "90000",
-                str(temp_tail)
-            ]
+            if has_logo:
+                tail_filter = (
+                    f"[0:v]{scale_filter}[bg];"
+                    f"[bg][1:v]overlay=0:0[bg_wm];"
+                    f"[bg_wm]fade=t=out:st={tail_fade_st:.3f}:d=1.0[bg_faded];"
+                    f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+                    f"[bg_faded][logo]overlay={logo_overlay_pos}[outv]"
+                )
+                cmd_tail = [
+                    "ffmpeg", "-y",
+                    "-stream_loop", "-1", "-i", str(speech_bg_path),
+                    "-loop", "1", "-i", str(watermark_path),
+                    "-loop", "1", "-i", str(channel_logo_path),
+                    "-filter_complex", tail_filter,
+                    "-map", "[outv]",
+                    "-vframes", str(tail_frames),
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-r", str(FPS),
+                    "-video_track_timescale", "90000",
+                    str(temp_tail)
+                ]
+            else:
+                tail_filter = (
+                    f"[0:v]{scale_filter}[bg];"
+                    f"[bg][1:v]overlay=0:0[with_wm];"
+                    f"[with_wm]fade=t=out:st={tail_fade_st:.3f}:d=1.0[outv]"
+                )
+                cmd_tail = [
+                    "ffmpeg", "-y",
+                    "-stream_loop", "-1", "-i", str(speech_bg_path),
+                    "-loop", "1", "-i", str(watermark_path),
+                    "-filter_complex", tail_filter,
+                    "-map", "[outv]",
+                    "-vframes", str(tail_frames),
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-r", str(FPS),
+                    "-video_track_timescale", "90000",
+                    str(temp_tail)
+                ]
             subprocess.run(cmd_tail, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # 4. Concat manifest
@@ -758,13 +860,18 @@ def main():
     print(f"[Input Audio] Total speech audio duration: {speech_duration:.2f}s ({speech_duration/60:.2f} min)")
 
     # 2. Build Props & Calculate Durations
-    mode = str(tafsir_input.get("mode", "standard")).strip().lower()
+    items = tafsir_input.get("segments") or tafsir_input.get("verses", [])
+    needs_db = any(
+        str(v.get("mode") or v.get("type") or "").strip().lower() in ("verse", "standard", "")
+        and not (("arabic" in v or "arabic_text" in v) and ("bengali" in v or "bengali_translation" in v or "translation" in v))
+        for v in items
+    )
     db = None
-    if mode != "custom":
+    if needs_db:
         try:
             db = load_verse_db()
         except FileNotFoundError:
-            print("[Warning] Quran database not found. If using custom segments, db is not required.")
+            print("[Warning] Quran database not found. If all verses use 'custom_text' mode, the database is not needed.")
 
     props = build_props(tafsir_input, db)
     intro_frames, intro_duration = calculate_intro_duration(props)
@@ -806,6 +913,7 @@ def main():
     extro_invite_path = find_asset("extro_invite.mp3")
     extro_verse_path = find_asset("extro_verse.mp3")
     speech_bg_path = find_asset("speech_bg.mp4")
+    channel_logo_path = find_asset("icb_logo.png")
 
     print(f"  • Output Video:             {final_video_path.name}")
     print(f"  • Output Podcast Audio:     {final_audio_path.name}")
@@ -831,7 +939,7 @@ def main():
         render_speech_scene(
             speech_bg_path, watermark_png_path, speech_audio_path,
             intro_duration, speech_audio_remaining, speech_scene_duration,
-            speech_clip_path
+            speech_clip_path, channel_logo_path
         )
         return
     if args.audio_only:
@@ -857,7 +965,7 @@ def main():
     render_speech_scene(
         speech_bg_path, watermark_png_path, speech_audio_path,
         intro_duration, speech_audio_remaining, speech_scene_duration,
-        speech_clip_path
+        speech_clip_path, channel_logo_path
     )
 
     # 5. Master Podcast Audio: speech + 1.5s silence + extro_invite + extro_verse

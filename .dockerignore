@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+node_modules
+remotion/node_modules
+output/
+inputs/*.mp3
+inputs/*.m4a
+inputs/*.wav
+inputs/*.mp4
+*.tmp
+*.log

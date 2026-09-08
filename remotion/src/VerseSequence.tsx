@@ -12,6 +12,7 @@ import { VerseSlide } from "./VerseSlide";
 import { IntroSlide, IntroData } from "./IntroSlide";
 import introBg from "./intro_bg.png";
 import scrollBg from "./verses_bg.png";
+import { ChannelWatermark } from "./ChannelWatermark";
 
 export const FPS = 30;
 export const FADE_FRAMES = 30; // Verse text fade
@@ -291,6 +292,9 @@ export const VerseSequence: React.FC<VerseSequenceProps> = ({
           }}
         />
       )}
+
+      {/* 7. PERSISTENT CHANNEL WATERMARK (Top-most layer, 40% opacity) */}
+      <ChannelWatermark />
     </AbsoluteFill>
   );
 };

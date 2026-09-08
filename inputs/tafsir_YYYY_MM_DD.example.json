@@ -17,15 +17,22 @@
   //      of the Scene 1 Intro Title Card, ensuring the slide transition into
   //      the recitation slide occurs at the exact millisecond recitation begins.
   //
-  // 3. TWO OPERATING MODES:
-  //    - "standard": Automatically fetches Arabic text & Bengali translation
-  //                  from data/quran_taisirul_bengali.json using "verse_key".
-  //    - "custom"  : Completely bypasses the database. You provide "arabic"
-  //                  and "bengali" text directly inside each verse object.
-  //                  Ideal for splitting long verses into parts for pauses.
+  // 3. PER-VERSE INPUT MODES:
+  //    Each verse item in "verses" controls its own mode independently:
+  //
+  //    • "mode": "verse" (Default)
+  //      Fetches Arabic text and Bengali translation automatically from the
+  //      Quran database (data/quran_taisirul_bengali.json) using "verse_key".
+  //
+  //    • "mode": "custom_text"
+  //      Uses the provided "arabic" and "bengali" text directly.
+  //      Ideal when a long verse has pauses and you need to split it into
+  //      multiple parts/slides (e.g. "১ম অংশ" and "২য় অংশ").
+  //
+  //    BENEFIT: You can mix both modes freely in the same file! If only one
+  //    verse needs splitting, only that verse uses "custom_text", while all
+  //    other verses can remain "verse" (no need to copy-paste the whole Surah!).
   // =========================================================================
-  // Mode Selection: "standard" or "custom"
-  "mode": "standard",
   // Metadata displayed on the animated Scene 1 Intro Title Card
   "intro": {
     "title": "তাফসীরুল কুরআন",
@@ -34,39 +41,12 @@
     "date": "২৬ আগস্ট ২০২৬",
     "speaker": "মুফতি রাশেদুর রহমান"
   },
-  // =========================================================================
-  // MODE 1: STANDARD MODE (ACTIVE EXAMPLE)
-  // =========================================================================
-  // In standard mode, only "verse_key", "start", and "end" are required.
-  // "verse_key" must match an entry in data/quran_taisirul_bengali.json (e.g. "3:47").
   "verses": [
+    // -----------------------------------------------------------------------
+    // Verse 47 is long with a pause, so it is split into 2 parts using "custom_text":
+    // -----------------------------------------------------------------------
     {
-      "verse_key": "3:47",
-      "start": 15.057,
-      "end": 31.700
-    },
-    {
-      "verse_key": "3:48",
-      "start": 31.700,
-      "end": 38.230
-    }
-  ],
-  // =========================================================================
-  // MODE 2: CUSTOM MODE (ALTERNATIVE EXAMPLE)
-  // =========================================================================
-  // To use Custom Mode:
-  // 1. Change "mode": "custom" above.
-  // 2. Replace the "verses" array above with the list below.
-  //
-  // Why use custom mode?
-  // - Splitting long verses: When the speaker pauses midway through a long
-  //   verse, you can split it into parts (e.g., "3:47 (১ম অংশ)" and "3:47 (২য় অংশ)")
-  //   so the on-screen text advances in sync with the recitation.
-  // - Custom wording: You want specific Bengali phrasing or transliteration.
-  //
-  // Below is the complete example of how "verses" is structured in custom mode:
-  "_custom_mode_example": [
-    {
+      "mode": "custom_text",
       "verse_key": "3:47 (১ম অংশ)",
       "arabic": "قَالَتْ رَبِّ أَنَّىٰ يَكُونُ لِى وَلَدٌ وَلَمْ يَمْسَسْنِى بَشَرٌ",
       "bengali": "মারইয়াম বলল, ‘হে আমার প্রতিপালক! কীভাবে আমার পুত্র হবে, অথচ আমাকে কোন মানব স্পর্শ করেনি’।",
@@ -74,16 +54,19 @@
       "end": 20.680
     },
     {
+      "mode": "custom_text",
       "verse_key": "3:47 (২য় অংশ)",
       "arabic": "قَالَ كَذَٰلِكِ ٱللَّهُ يَخْلُقُ مَا يَشَآءُ ۚ إِذَا قَضَىٰٓ أَمْرًا فَإِنَّمَا يَقُولُ لَهُۥ كُن فَيَكُونُ",
       "bengali": "তিনি বললেন, ‘এভাবেই’ আল্লাহ সৃজন করেন যা তিনি ইচ্ছে করেন, তিনি যখন কিছু স্থির করেন তখন বলেন, ‘‘হয়ে যাও’’ সুতরাং তা হয়ে যায়।",
       "start": 20.680,
       "end": 31.700
     },
+    // -----------------------------------------------------------------------
+    // Verse 48 is recited normally, so we use "verse" to auto-fetch from database:
+    // -----------------------------------------------------------------------
     {
+      "mode": "verse",
       "verse_key": "3:48",
-      "arabic": "وَيُعَلِّمُهُ ٱلْكِتَـٰبَ وَٱلْحِكْمَةَ وَٱلتَّوْরَىٰةَ وَٱلْإِنجِيلَ",
-      "bengali": "আর তিনি তাকে কিতাব, হিকমাত, তাওরাত ও ইঞ্জিল শিক্ষা দেবেন।",
       "start": 31.700,
       "end": 38.230
     }

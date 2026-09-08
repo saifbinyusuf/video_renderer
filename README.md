@@ -48,7 +48,9 @@ This tool transforms a weekly Quran tafseer lecture audio file and metadata JSON
 │   │   ├── IntroSlide.tsx           # Intro title card animation
 │   │   ├── VerseSlide.tsx           # Quran verse scroll & translations
 │   │   ├── ExtroSlide.tsx           # Closing invitation card animations
-│   │   └── SpeechWatermark.tsx      # Top-left transparent watermark
+│   │   ├── SpeechWatermark.tsx      # Top-left transparent watermark
+│   │   ├── ChannelWatermark.tsx     # Persistent bottom-right channel logo watermark
+│   │   └── icb_logo.png             # Transparent ICB channel logo
 ├── docker-compose.yml               # Docker Compose service definition
 └── Dockerfile                       # Node 20 + Debian + Chromium + FFmpeg image
 ```
@@ -126,13 +128,19 @@ docker compose run --rm verse-renderer python3 python/render_verses.py --audio-o
 
 ---
 
-### Format 1: Standard Mode (`"mode": "standard"`)
+### Per-Verse Modes (`"verse"` vs `"custom_text"`)
 
-Use standard mode when reciting complete Quranic verses that exist directly in the database (`data/quran_taisirul_bengali.json`). Arabic text and Bengali translations are automatically looked up using `verse_key` (e.g., `"3:47"`, `"18:1"`).
+Each verse in the `verses` array controls its own mode individually. This allows you to mix standard Quran verses with custom split text in the same video:
+
+* **`"mode": "verse"` (Default)**: Automatically fetches the Arabic text and Bengali translation from the Quran database (`data/quran_taisirul_bengali.json`) using `verse_key` (e.g., `"3:48"`). You only need to provide `verse_key`, `start`, and `end`.
+* **`"mode": "custom_text"`**: Bypasses the database for that specific entry. You provide `arabic` and `bengali` directly.
+  * **Why use this?** When the speaker pauses midway through a long verse, you can split that single verse into multiple slides (e.g., `"3:47 (১ম অংশ)"` and `"3:47 (২য় অংশ)"`) so the on-screen text advances in sync with the recitation.
+  * **No redundant copy-pasting**: Splitting one verse does **not** force you to manually copy-paste the other verses—unsplit verses can stay as `"mode": "verse"`.
+
+#### Example Configuration (`inputs/tafsir_YYYY_MM_DD.json`):
 
 ```json
 {
-  "mode": "standard",
   "intro": {
     "title": "তাফসীরুল কুরআন",
     "surah_name": "সূরা আলে-ইমরান",
@@ -142,40 +150,7 @@ Use standard mode when reciting complete Quranic verses that exist directly in t
   },
   "verses": [
     {
-      "verse_key": "3:47",
-      "start": 15.057,
-      "end": 31.700
-    },
-    {
-      "verse_key": "3:48",
-      "start": 31.700,
-      "end": 38.230
-    }
-  ]
-}
-```
-
----
-
-### Format 2: Custom Mode (`"mode": "custom"`)
-
-Use custom mode when:
-* **Splitting long verses**: When the speaker pauses midway through a long verse, you can break the verse into parts (e.g., `3:47 (১ম অংশ)` and `3:47 (২য় অংশ)`) so the viewer can follow along on screen in sync with the recitation.
-* **Custom wording**: You wish to provide custom Arabic text or specific Bengali phrasing/transliteration.
-* In custom mode, database lookup is completely bypassed; text is rendered exactly as specified in the JSON.
-
-```json
-{
-  "mode": "custom",
-  "intro": {
-    "title": "তাফসীরুল কুরআন",
-    "surah_name": "সূরা আলে-ইমরান",
-    "verse_range": "৪৭-৪৮",
-    "date": "২৬ আগস্ট ২০২৬",
-    "speaker": "মুফতি রাশেদুর রহমান"
-  },
-  "verses": [
-    {
+      "mode": "custom_text",
       "verse_key": "3:47 (১ম অংশ)",
       "arabic": "قَالَتْ رَبِّ أَنَّىٰ يَكُونُ لِى وَلَدٌ وَلَمْ يَمْسَسْنِى بَشَرٌ",
       "bengali": "মারইয়াম বলল, ‘হে আমার প্রতিপালক! কীভাবে আমার পুত্র হবে, অথচ আমাকে কোন মানব স্পর্শ করেনি’।",
@@ -183,6 +158,7 @@ Use custom mode when:
       "end": 20.680
     },
     {
+      "mode": "custom_text",
       "verse_key": "3:47 (২য় অংশ)",
       "arabic": "قَالَ كَذَٰلِكِ ٱللَّهُ يَخْلُقُ مَا يَشَآءُ ۚ إِذَا قَضَىٰٓ أَمْرًا فَإِنَّمَا يَقُولُ لَهُۥ كُن فَيَكُونُ",
       "bengali": "তিনি বললেন, ‘এভাবেই’ আল্লাহ সৃজন করেন যা তিনি ইচ্ছে করেন, তিনি যখন কিছু স্থির করেন তখন বলেন, ‘‘হয়ে যাও’’ সুতরাং তা হয়ে যায়।",
@@ -190,9 +166,8 @@ Use custom mode when:
       "end": 31.700
     },
     {
+      "mode": "verse",
       "verse_key": "3:48",
-      "arabic": "وَيُعَلِّمُهُ ٱلْكِتَـٰبَ وَٱلْحِكْمَةَ وَٱلتَّوْরَىٰةَ وَٱلْإِنجِيلَ",
-      "bengali": "আর তিনি তাকে কিতাব, হিকমাত, তাওরাত ও ইঞ্জিল শিক্ষা দেবেন।",
       "start": 31.700,
       "end": 38.230
     }
@@ -200,15 +175,22 @@ Use custom mode when:
 }
 ```
 
+> **Tip**: If all verses in your halaqah are recited continuously without mid-verse pauses, you can simply provide `"verse_key"`, `"start"`, and `"end"` for each verse (the mode defaults automatically to `"verse"`).
+
 ---
 
 ## Asset Management & Architecture
 
 * **Remotion Single Source of Truth**: Remotion components bundle slide-specific graphics and audio assets (`intro_bg.png`, `verses_bg.png`, `extro_invite.mp3`, `extro_verse.mp3`) directly from `remotion/src/`. The Python script accesses these via `find_asset()`, avoiding redundant asset duplicates.
 * **Global Assets**: Common fonts (`assets/fonts/`) and the looping video background (`assets/speech_bg.mp4`) are kept under `assets/`.
+* **Channel Watermark (Bottom-Right Logo)**: The ICB logo (`remotion/src/icb_logo.png`) persists throughout the entire video at 40% opacity on the top-most layer (`zIndex: 9999`), above dark overlays and scene fades. You can customize its dimensions and position at the top of `python/render_verses.py` and `remotion/src/ChannelWatermark.tsx`:
+  - `CHANNEL_LOGO_WIDTH = 180` (width in pixels)
+  - `CHANNEL_LOGO_OPACITY = 0.4` (40% opacity)
+  - `CHANNEL_LOGO_RIGHT = 50` (margin from right border)
+  - `CHANNEL_LOGO_BOTTOM = 40` (margin from bottom border)
 * **Outro Audio Volume Control**: You can adjust the relative volume of outro audio clips at the top of `python/render_verses.py` and `remotion/src/ExtroScene.tsx`:
   - `EXTRO_INVITE_VOLUME = 1.0` (invitation voice clip)
-  - `EXTRO_VERSE_VOLUME = 0.6` (closing recitation clip, set to 60% by default)
+  - `EXTRO_VERSE_VOLUME = 0.3` (closing recitation clip, set to 30% by default)
 
 ---
 
