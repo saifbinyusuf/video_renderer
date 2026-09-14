@@ -199,3 +199,45 @@ Each verse in the `verses` array controls its own mode individually. This allows
 * **Live Code Updates**: Code directories (`python/`, `remotion/src/`, `inputs/`, `output/`, `assets/`) are mounted as live Docker volumes. You **do not** need to rebuild the Docker image after editing Python or Remotion code.
 * **Audio Constraint**: Ensure there is **strictly one** speech audio clip inside `inputs/`. If multiple audio files are found, the script will halt with an error to prevent using the wrong audio.
 * **Disk Space**: Clean up old intermediate files in `output/` periodically if running low on disk space.
+
+
+---
+
+## Automated YouTube Publishing
+
+Once you have rendered and verified the final video, you can publish it directly to YouTube using the standalone publishing tool:
+
+```bash
+# First-time publish (with port mapping for one-time browser login):
+docker compose run --rm -p 8080:8080 verse-renderer python3 python/publish_youtube.py inputs/tafsir_YYYY_MM_DD.json
+
+# Subsequent publishes (fully headless):
+docker compose run --rm verse-renderer python3 python/publish_youtube.py inputs/tafsir_YYYY_MM_DD.json
+```
+*(If no input file is specified, it automatically detects the latest `tafsir_*.json` in `inputs/`)*.
+
+### What it does:
+1. **Generates Title & Description**: Formulates title, description, and Bengali tags automatically from your input JSON.
+2. **Generates Custom Thumbnail**: Uses Remotion to render a 1920×1080 thumbnail (`output/thumbnail_YYYY_MM_DD.jpg`) with matching typography, twilight mosque background, and channel logo.
+3. **Uploads Video**: Uploads the master video (`output/final_video_YYYY_MM_DD.mp4`) as `public`.
+4. **Applies Custom Thumbnail**: Sets the generated thumbnail onto the video.
+5. **Adds to Playlist**: Inserts the video into your channel playlist.
+6. **Outputs Live Link**: Prints the direct link (`https://youtu.be/...`) and playlist URL.
+
+### Command Options:
+* `--dry-run`: Generates metadata and thumbnail, but skips uploading (great for verifying everything before publishing).
+* `--thumbnail-only`: Renders only the 1920×1080 thumbnail image (`output/thumbnail_YYYY_MM_DD.jpg`).
+* `--privacy {public,unlisted,private}`: Overrides the privacy status (defaults to `public` or `.env` setting).
+* `--playlist-id <id>`: Overrides the target YouTube playlist ID.
+
+### Environment Configuration (`.env`):
+```bash
+# Target YouTube playlist ID (from playlist URL: list=PL...)
+YOUTUBE_PLAYLIST_ID=PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Path to downloaded Google Cloud OAuth client secret file
+YOUTUBE_CLIENT_SECRET_FILE=client_secret.json
+
+# Default privacy status
+YOUTUBE_PRIVACY_STATUS=public
+```

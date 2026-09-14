@@ -3,6 +3,7 @@ import { Composition, Still } from "remotion";
 import { VerseSequence, VerseSequenceProps, FPS } from "./VerseSequence";
 import { SpeechWatermark } from "./SpeechWatermark";
 import { ExtroScene, EXTRO_TOTAL_FRAMES } from "./ExtroScene";
+import { Thumbnail } from "./Thumbnail";
 
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -76,6 +77,21 @@ export const RemotionRoot: React.FC = () => {
         width={WIDTH}
         height={HEIGHT}
         durationInFrames={EXTRO_TOTAL_FRAMES}
+      />
+
+      {/* 4. Video Thumbnail (1920x1080 Still) */}
+      <Still
+        id="Thumbnail"
+        component={Thumbnail}
+        width={WIDTH}
+        height={HEIGHT}
+        defaultProps={{
+          title: "তাফসীরুল কুরআন",
+          surah_name: "সূরা আলে-ইমরান",
+          verse_range: "৫৫-৬০",
+          date: "০৯ সেপ্টেম্বর ২০২৬",
+          speaker: "মুফতি রাশেদুর রহমান",
+        }}
       />
     </>
   );

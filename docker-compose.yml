@@ -9,4 +9,9 @@ services:
       - ./remotion/src:/app/remotion/src
       - ./remotion/remotion.config.ts:/app/remotion/remotion.config.ts
       - ./python:/app/python
+      - ./.env:/app/.env
+      - ./client_secret.json:/app/client_secret.json
+      - ./token.json:/app/token.json
+    ports:
+      - "8080:8080"
     tty: true

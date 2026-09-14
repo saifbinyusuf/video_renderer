@@ -9,6 +9,11 @@ RUN echo "Types: deb\nURIs: http://mirrors.edge.kernel.org/debian\nSuites: bookw
     libpango-1.0-0 libcairo2 libatspi2.0-0 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
+# Google API libraries for YouTube publishing (pip purged immediately after install to keep image slim)
+RUN apt-get update -o Acquire::Retries=5 && apt-get install -y --no-install-recommends -o Acquire::Retries=5 python3-pip && \
+    pip3 install --no-cache-dir --break-system-packages google-api-python-client google-auth-oauthlib google-auth-httplib2 python-dotenv && \
+    apt-get purge -y python3-pip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY remotion/package.json ./remotion/package.json
