@@ -140,7 +140,7 @@ def extract_code_from_redirect(user_input: str) -> str:
 
 def get_authenticated_service():
     creds = None
-    if TOKEN_FILE.exists() and TOKEN_FILE.stat().st_size > 0:
+    if TOKEN_FILE.exists() and TOKEN_FILE.is_file() and TOKEN_FILE.stat().st_size > 0:
         try:
             creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
         except Exception as e:
@@ -150,8 +150,14 @@ def get_authenticated_service():
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             print("[Auth] Refreshing expired access token...")
-            creds.refresh(google.auth.transport.requests.Request())
-        else:
+            try:
+                creds.refresh(google.auth.transport.requests.Request())
+            except Exception as e:
+                print(f"[Auth] Notice: Stored refresh token is expired or revoked ({e}).")
+                print("[Auth] Initiating fresh authorization...")
+                creds = None
+
+        if not creds or not creds.valid:
             if not CLIENT_SECRET_FILE.exists() or CLIENT_SECRET_FILE.stat().st_size == 0:
                 raise FileNotFoundError(
                     f"OAuth client secret file not found at: {CLIENT_SECRET_FILE}\n"
@@ -161,54 +167,48 @@ def get_authenticated_service():
             print(f"[Auth] Initiating one-time OAuth 2.0 authorization using {CLIENT_SECRET_FILE.name}...")
             flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_FILE), SCOPES)
             flow.redirect_uri = "http://localhost:8080/"
-            auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
 
             print("\n" + "=" * 65)
             print("🔑 YouTube Authorization Required (One-Time Setup)")
             print("=" * 65)
-            print("1. Open this URL in your browser:\n")
-            print(f"   {auth_url}\n")
-            print("2. Sign in with your YouTube channel Google Account and click \x27Allow\x27.")
-            print("3. If you ran Docker with \x27-p 8080:8080\x27, the browser will redirect")
-            print("   to localhost:8080 and automatically complete authorization.")
-            print("4. If the page shows \x27Site can\x27t be reached\x27, simply copy the FULL")
-            print("   redirect URL from the address bar and paste it below.")
+            print("1. Open the URL printed below in your browser.")
+            print("2. Sign in with your YouTube channel Google Account and click 'Allow'.")
+            print("3. Because port 8080 is forwarded (-p 8080:8080), authorization")
+            print("   will complete automatically when Google redirects to localhost:8080.")
+            print("   (Do NOT copy or paste anything into the terminal!)")
             print("=" * 65 + "\n")
 
             creds = None
-            server_error = [None]
-            server_creds = [None]
-
-            def run_server():
-                try:
-                    server_creds[0] = flow.run_local_server(
-                        host="localhost",
-                        port=8080,
-                        bind_addr="0.0.0.0",
-                        open_browser=False,
-                        timeout_seconds=90
-                    )
-                except Exception as ex:
-                    server_error[0] = ex
-
-            server_thread = threading.Thread(target=run_server, daemon=True)
-            server_thread.start()
-
             try:
-                user_code = input("Waiting for redirect (or paste redirect URL / auth code here): ").strip()
-                if user_code:
-                    clean_code = extract_code_from_redirect(user_code)
-                    flow.fetch_token(code=clean_code)
-                    creds = flow.credentials
-            except (EOFError, KeyboardInterrupt):
-                pass
-
-            if not creds:
-                server_thread.join(timeout=30)
-                creds = server_creds[0]
+                creds = flow.run_local_server(
+                    host="localhost",
+                    port=8080,
+                    bind_addr="0.0.0.0",
+                    open_browser=False,
+                    timeout_seconds=120,
+                    prompt="consent",
+                    access_type="offline"
+                )
+            except Exception as ex:
+                print(f"\n[Auth] Automatic redirect server didn't complete ({ex}).")
+                print("[Auth] Falling back to manual paste mode...\n")
+                auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+                print(f"Open this URL:\n   {auth_url}\n")
+                try:
+                    user_input = input("Paste the FULL redirect URL or authorization code here: ").strip()
+                    if user_input:
+                        clean_code = extract_code_from_redirect(user_input)
+                        flow.fetch_token(code=clean_code)
+                        creds = flow.credentials
+                except (EOFError, KeyboardInterrupt):
+                    pass
 
             if not creds:
                 raise RuntimeError("Failed to complete YouTube OAuth authorization. Please try again.")
+
+        if TOKEN_FILE.is_dir():
+            import shutil
+            shutil.rmtree(TOKEN_FILE)
 
         with open(TOKEN_FILE, "w", encoding="utf-8") as f:
             f.write(creds.to_json())

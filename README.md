@@ -38,6 +38,8 @@ This tool transforms a weekly Quran tafseer lecture audio file and metadata JSON
 │   ├── final_audio_YYYY_MM_DD.mp3   # Master podcast audio
 │   └── ...                          # Intermediate cached clips
 ├── python/
+│   ├── generate_input.py            # Automated verse timestamp & input JSON generator (Groq Whisper + Qwen)
+│   ├── publish_youtube.py           # Automated YouTube metadata & publishing tool
 │   └── render_verses.py             # Master orchestrator script
 ├── remotion/                        # React Remotion compositions & slide assets
 │   ├── src/
@@ -65,7 +67,13 @@ Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS
 ### 2. Prepare Weekly Inputs
 In the `inputs/` folder, place:
 1. **Exactly one audio file** (`.mp3`, `.wav`, or `.m4a`) containing the lecture speech.
-2. **One JSON file** named `tafsir_YYYY_MM_DD.json` (e.g., `inputs/tafsir_2026_09_02.json`). You can copy `inputs/tafsir_YYYY_MM_DD.example.json` to get started.
+2. **Generate the input JSON** (`inputs/tafsir_YYYY_MM_DD.json`):
+   * **Recommended (Automated)**: Run the AI generator to auto-extract timestamps and split verses:
+     ```bash
+     python3 python/generate_input.py --surah <NUM> --verses <RANGE> --start <REC_START> --end <REC_END>
+     ```
+     *(See [Automated Verse Timestamp Generator](#automated-verse-timestamp-generator-groq-whisper--qwen) below for details)*
+   * **Manual**: Copy `inputs/tafsir_YYYY_MM_DD.example.json` and enter timestamps manually.
 
 ### 3. Build the Docker Image (First Time Only)
 ```bash
@@ -112,13 +120,78 @@ docker compose run --rm verse-renderer python3 python/render_verses.py --audio-o
 
 ---
 
+## Automated Verse Timestamp Generator (Groq Whisper + Qwen)
+
+Instead of manually listening to the audio recitation and typing timestamps by hand, you can generate the complete `inputs/tafsir_YYYY_MM_DD.json` automatically using [`python/generate_input.py`](python/generate_input.py).
+
+### How It Works:
+1. **Recitation Slicing**: Extracts only the Quran recitation block based on the rough `--start` and `--end` timestamps you provide.
+2. **Phase 1 — Speech-to-Text (Groq Whisper Large v3)**: Transcribes the recitation with word-level timestamps and automatically annotates acoustic breath pauses (`[PAUSE: X.Xs]`) and repeated transition words.
+3. **Phase 2 — AI Verse Alignment & Splitting (Groq Qwen 3.8 27B)**:
+   * Aligns recognized audio words against official Uthmanic Arabic text from `data/quran_taisirul_bengali.json`.
+   * Splits long verses (> 15 words) using pause locations and semantic meaning.
+   * Symmetrically splits Bengali Taisirul Quran translations for each sub-verse segment.
+   * Predicts the exact `start` timestamp of each segment.
+4. **Zero-Gap Timestamp Chaining**: Automatically chains end timestamps (`verse[i].end = verse[i+1].start`), ensuring gap-free, seamless video transitions.
+5. **Auto-Metadata Assembly**: Extracts the lecture date from the audio filename (e.g. `2026-09-16` -> `১৬ সেপ্টেম্বর ২০২৬`), converts Surah names and verse ranges to Bengali numerals, and outputs a ready-to-render JSON file.
+
+### Prerequisites:
+Set your Groq API key in your `.env` file:
+```bash
+GROQ_API_KEY=gsk_your_groq_api_key_here
+```
+
+### Usage Examples:
+
+Simply find the start and end of the recitation in your lecture audio (e.g., recitation starts at 16.11s and regular speech resumes at 68.0s):
+
+#### Option A: Running with Local Python
+```bash
+python3 python/generate_input.py \
+  --surah 3 \
+  --verses 60-63 \
+  --start 16.11 \
+  --end 68.0
+```
+
+#### Option B: Running inside Docker
+```bash
+docker compose run --rm verse-renderer python3 python/generate_input.py \
+  --surah 3 \
+  --verses 60-63 \
+  --start 16.11 \
+  --end 68.0
+```
+
+> **Tip**: The `--start` and `--end` flags accept either seconds (e.g., `16.11`, `68.0`) or `MM:SS` format (e.g., `00:16.11`, `01:08.0`).
+
+### Command-Line Arguments:
+
+| Argument | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--surah` | **Yes** | — | Surah number (e.g. `3`) |
+| `--verses` | **Yes** | — | Verse range (e.g. `'60-63'` or `'60'`) |
+| `--start` | **Yes** | — | Start timestamp of recitation in the speech audio (seconds or `MM:SS`) |
+| `--end` | **Yes** | — | End timestamp of recitation in the speech audio (seconds or `MM:SS`) |
+| `--audio` | No | Auto-detect | Path to speech audio file (defaults to sole audio file in `inputs/`) |
+| `--output` | No | Auto-detect | Destination JSON path (defaults to `inputs/tafsir_YYYY_MM_DD.json`) |
+| `--max-words`| No | `15` | Maximum words allowed per slide segment before splitting |
+| `--speaker` | No | `মুফতি রাশেদুর রহমান` | Speaker name for intro title card |
+| `--title` | No | `তাফসীরুল কুরআন` | Program title for intro title card |
+| `--surah-name`| No | Auto-detect | Override Surah Bengali name (defaults to standard Bengali Surah list) |
+| `--date` | No | Auto-detect | Override Bengali date string (defaults to date parsed from audio filename) |
+
+---
+
 ## Input JSON Format
 
 ### CRITICAL: Audio Timestamp Synchronization
 
 > **Important**: The `start` and `end` timestamps for each verse **MUST be taken directly from the main speech audio file (`inputs/*.mp3`)**, measured in seconds from the very beginning (`00:00.000`) of that audio file.
 >
-> **How to get timestamps:**
+> *(Note: When using [`python/generate_input.py`](#automated-verse-timestamp-generator-groq-whisper--qwen), these timestamps and segment splits are calculated automatically!)*
+>
+> **How to get timestamps manually:**
 > 1. Open your speech audio file in an audio player or editor (such as Audacity, QuickTime, or VLC).
 > 2. Note the exact timestamp where the speaker begins reciting the first verse (e.g., at `00:15.057` -> enter `15.057`).
 > 3. Note when each verse ends and the next starts (e.g., `20.680`, `31.700`, `38.230`).
