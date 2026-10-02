@@ -172,7 +172,10 @@ def slice_audio(audio_path: Path, start_sec: float, end_sec: float, out_path: Pa
 def run_groq_whisper(slice_wav_path: Path, api_key: str, slice_start_sec: float) -> list[dict]:
     """Transcribes sliced audio via Groq Whisper with word-level timestamps."""
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"
+    }
 
     print("[Phase 1/2] Calling Groq Whisper Large v3 for word-level transcription...")
     with open(slice_wav_path, "rb") as f:
@@ -293,7 +296,11 @@ Return valid JSON with top-level key "verses".
 """
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"
+    }
     payload = {
         "model": "qwen/qwen3.8-27b",
         "messages": [
