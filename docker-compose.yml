@@ -1,6 +1,7 @@
 services:
   verse-renderer:
     build: .
+    shm_size: "2gb"
     volumes:
       - ./inputs:/app/inputs
       - ./output:/app/output

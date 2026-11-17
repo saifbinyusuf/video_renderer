@@ -10,9 +10,10 @@ This tool transforms a weekly Quran tafseer lecture audio file and metadata JSON
 
 ## Architecture Highlights
 
-* **Remotion + Chromium**: Renders smooth, spring-animated React components for the Intro, Quran verse scroll, and Extro cards.
-* **FFmpeg Hardware-Accurate Looping**: Uses a modular stream-copy loop architecture that processes 30+ minutes of video in less than 5 minutes without redundant CPU encoding.
-* **Separated Video & Audio Pipelines**: Generates both standalone podcast master MP3 and final composite MP4 in exact sample-accurate sync.
+* **Remotion + Chromium (`shm_size: 2gb`)**: Renders smooth, spring-animated React components for the Intro, Quran verse scroll, and Extro cards using pre-scaled 1080p backdrop (`intro_bg_1080.png`) and pre-baked scroll drop-shadow (`verses_bg_shadow.png`).
+* **Single-Bundle Parallel Pipeline**: Bundles Remotion once per run, caches the static Extro clip across runs when sources are unchanged, and renders Scene 2 (Main Speech) plus Master Audio concurrently in the background while Scene 1 renders.
+* **FFmpeg Stream-Copy Loop & Single-Pass Assembly**: Uses native `-stream_loop` copy and single-pass concat + mux (eliminating redundant intermediate audio encodes and temporary full-length video copies) to assemble 30+ minutes of video in ~2 seconds.
+* **Single-Decode Dual Audio Pipeline**: Generates both the standalone podcast master MP3 and video AAC track in one FFmpeg `asplit` pass straight from source audio, avoiding a second lossy generation.
 * **Clean Single Source of Truth**: Slide assets live in `remotion/src/` for Remotion's bundler and are referenced directly by the Python pipeline, eliminating duplicate media files.
 
 ---
@@ -43,8 +44,10 @@ This tool transforms a weekly Quran tafseer lecture audio file and metadata JSON
 │   └── render_verses.py             # Master orchestrator script
 ├── remotion/                        # React Remotion compositions & slide assets
 │   ├── src/
-│   │   ├── intro_bg.png             # Twilight mosque backdrop for Intro card
-│   │   ├── verses_bg.png            # Quran recitation backdrop
+│   │   ├── intro_bg.png             # Master high-res twilight mosque backdrop
+│   │   ├── intro_bg_1080.png        # Pre-scaled 1080p backdrop used in renders
+│   │   ├── verses_bg.png            # Master Quran recitation scroll backdrop
+│   │   ├── verses_bg_shadow.png     # Scroll backdrop with pre-baked drop-shadow
 │   │   ├── extro_invite.mp3         # Outro invitation voice audio
 │   │   ├── extro_verse.mp3          # Outro closing Quran recitation
 │   │   ├── IntroSlide.tsx           # Intro title card animation
@@ -100,13 +103,13 @@ You can run individual parts of the pipeline to preview or test changes rapidly:
 
 | Flag | Purpose | Typical Run Time |
 | :--- | :--- | :--- |
-| *(default)* | Runs full end-to-end pipeline (Intro + Speech + Audio + Extro + Assembly) | ~1.5 minutes |
-| `--assemble-only` | Assembles master video and audio from existing cached clips | ~15 seconds |
-| `--audio-only` | Renders only the master podcast audio (`.mp3`) | ~10 seconds |
-| `--speech-only` | Renders only Scene 2 (Main Speech video with watermark) | ~35 seconds |
-| `--intro-only` | Renders only Scene 1 (Remotion Intro + Quran Verses) | ~40 seconds |
-| `--extro-only` | Renders only Scene 3 (Remotion Extro invitation cards) | ~15 seconds |
-| `--watermark-only`| Renders only the 1080p transparent watermark PNG | ~2 seconds |
+| *(default)* | Runs full end-to-end pipeline (Intro + Speech + Audio + Extro + Assembly) | ~3.7–4.4 min *(warm / cold Extro)* |
+| `--assemble-only` | Assembles master video and audio from existing cached clips | ~2 seconds |
+| `--audio-only` | Renders only the master podcast audio (`.mp3`) | ~15 seconds |
+| `--speech-only` | Renders only Scene 2 (Main Speech video with watermark) | ~45 seconds |
+| `--intro-only` | Renders only Scene 1 (Remotion Intro + Quran Verses) | ~4 minutes |
+| `--extro-only` | Renders only Scene 3 (Remotion Extro invitation cards) | ~48 seconds |
+| `--watermark-only`| Renders only the 1080p transparent watermark PNG | ~5–6 seconds |
 
 **Example (re-assembling existing clips):**
 ```bash
@@ -254,7 +257,7 @@ Each verse in the `verses` array controls its own mode individually. This allows
 
 ## Asset Management & Architecture
 
-* **Remotion Single Source of Truth**: Remotion components bundle slide-specific graphics and audio assets (`intro_bg.png`, `verses_bg.png`, `extro_invite.mp3`, `extro_verse.mp3`) directly from `remotion/src/`. The Python script accesses these via `find_asset()`, avoiding redundant asset duplicates.
+* **Remotion Single Source of Truth**: Remotion components bundle slide-specific graphics and audio assets (`intro_bg_1080.png`, `verses_bg_shadow.png`, `extro_invite.mp3`, `extro_verse.mp3`) directly from `remotion/src/` (keeping master files `intro_bg.png` and `verses_bg.png` intact). The Python script accesses these via `find_asset()`, avoiding redundant asset duplicates. Optional `REMOTION_CONCURRENCY` and `REMOTION_GL` environment variables can override Remotion's browser concurrency or GL backend.
 * **Global Assets**: Common fonts (`assets/fonts/`) and the looping video background (`assets/speech_bg.mp4`) are kept under `assets/`.
 * **Channel Watermark (Bottom-Right Logo)**: The ICB logo (`remotion/src/icb_logo.png`) persists throughout the entire video at 40% opacity on the top-most layer (`zIndex: 9999`), above dark overlays and scene fades. You can customize its dimensions and position at the top of `python/render_verses.py` and `remotion/src/ChannelWatermark.tsx`:
   - `CHANNEL_LOGO_WIDTH = 180` (width in pixels)

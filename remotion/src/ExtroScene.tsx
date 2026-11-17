@@ -11,7 +11,7 @@ import {
 } from "remotion";
 import { ExtroInviteSlide, ExtroVerseSlide } from "./ExtroSlide";
 import { ChannelWatermark } from "./ChannelWatermark";
-import introBg from "./intro_bg.png";
+import introBg from "./intro_bg_1080.png";
 import extroInviteAudio from "./extro_invite.mp3";
 import extroVerseAudio from "./extro_verse.mp3";
 

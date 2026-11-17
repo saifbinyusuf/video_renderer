@@ -10,8 +10,8 @@ import {
 } from "remotion";
 import { VerseSlide } from "./VerseSlide";
 import { IntroSlide, IntroData } from "./IntroSlide";
-import introBg from "./intro_bg.png";
-import scrollBg from "./verses_bg.png";
+import introBg from "./intro_bg_1080.png";
+import scrollBg from "./verses_bg_shadow.png";
 import { ChannelWatermark } from "./ChannelWatermark";
 
 export const FPS = 30;
@@ -253,7 +253,6 @@ export const VerseSequence: React.FC<VerseSequenceProps> = ({
             height: "100%",
             objectFit: "contain",
             clipPath: `inset(0% ${scrollInsetX}% 0% ${scrollInsetX}%)`,
-            filter: "drop-shadow(0 15px 30px rgba(0, 0, 0, 0.85))",
           }}
         />
       )}

@@ -1,7 +1,7 @@
 import React from "react";
 import { AbsoluteFill, Img } from "remotion";
 import { IntroSlide, IntroData } from "./IntroSlide";
-import introBg from "./intro_bg.png";
+import introBg from "./intro_bg_1080.png";
 import { ChannelWatermark } from "./ChannelWatermark";
 
 export const Thumbnail: React.FC<IntroData> = (props) => {

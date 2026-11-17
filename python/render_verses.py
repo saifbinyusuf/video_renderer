@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import shutil
@@ -7,6 +8,7 @@ import sys
 from pathlib import Path
 
 FPS = 30
+EXTRO_TOTAL_FRAMES = 411
 SILENCE_DURATION = 1.5  # 1.5s silence after speech ends before extro begins
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 
@@ -212,54 +214,103 @@ def write_clean_config():
     return config_path
 
 
-def render_intro_scene(props: dict, speech_audio_path: Path, intro_duration: float, out_path: Path):
-    """Step 1: Render Remotion VerseSequence and mux speech audio from t=0 to intro_duration."""
+def ensure_remotion_bundle(bundle_dir: Path | None = None) -> Path:
+    """Bundles the Remotion project once so all renders/stills share a single webpack build."""
+    if bundle_dir is None:
+        bundle_dir = (
+            Path("/tmp/remotion_bundle")
+            if Path("/app/remotion").exists()
+            else OUTPUT_DIR / ".remotion_bundle"
+        )
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+    cmd = ["npx", "remotion", "bundle", "src/index.ts", f"--out-dir={bundle_dir}"]
+    print(f"[Remotion] Bundling compositions once -> {bundle_dir}...")
+    subprocess.run(cmd, cwd=REMOTION_DIR, check=True)
+    return bundle_dir
+
+
+def get_remotion_common_args(include_concurrency: bool = True) -> list[str]:
+    """Returns shared Remotion CLI flags for Chromium path, GL backend, and concurrency."""
+    args: list[str] = []
+    chromium_path = os.environ.get("REMOTION_CHROMIUM_EXECUTABLE_PATH", "/usr/bin/chromium")
+    if Path(chromium_path).exists():
+        args.append(f"--browser-executable={chromium_path}")
+
+    gl_backend = os.environ.get("REMOTION_GL", "").strip()
+    if gl_backend:
+        args.append(f"--gl={gl_backend}")
+
+    if include_concurrency:
+        concurrency = os.environ.get("REMOTION_CONCURRENCY", "").strip()
+        if concurrency:
+            args.append(f"--concurrency={concurrency}")
+
+    return args
+
+
+def render_intro_scene(
+    props: dict,
+    speech_audio_path: Path,
+    intro_duration: float,
+    out_path: Path,
+    bundle_dir: Path | None = None,
+    mux_audio: bool = True,
+):
+    """Step 1: Render Remotion VerseSequence and optionally mux speech audio from t=0 to intro_duration."""
     props_path = REMOTION_DIR / "tmp_intro_props.json"
     props_path.write_text(json.dumps(props, ensure_ascii=False, indent=2), encoding="utf-8")
     config_path = write_clean_config()
 
-    raw_intro = OUTPUT_DIR / "intro_raw.mp4"
+    entry = str(bundle_dir) if bundle_dir is not None else "src/index.ts"
+    render_target = (OUTPUT_DIR / "intro_raw.mp4") if mux_audio else out_path
 
     cmd = [
         "npx", "remotion", "render",
-        "src/index.ts", "VerseSequence",
-        str(raw_intro),
+        entry, "VerseSequence",
+        str(render_target),
         f"--props={props_path}",
         f"--config={config_path}",
         "--codec=h264",
     ]
-    chromium_path = os.environ.get("REMOTION_CHROMIUM_EXECUTABLE_PATH", "/usr/bin/chromium")
-    if Path(chromium_path).exists():
-        cmd.append(f"--browser-executable={chromium_path}")
+    if not mux_audio:
+        cmd.append("--muted")
+    cmd.extend(get_remotion_common_args(include_concurrency=True))
 
     print(f"[Scene 1/3] Rendering Intro + Verses sequence ({intro_duration:.2f}s) via Remotion...")
     subprocess.run(cmd, cwd=REMOTION_DIR, check=True)
 
-    print(f"[Scene 1/3] Muxing speech audio (0.0s -> {intro_duration:.2f}s) into intro clip...")
-    mux_cmd = [
-        "ffmpeg", "-y",
-        "-i", str(raw_intro),
-        "-ss", "0",
-        "-t", f"{intro_duration:.3f}",
-        "-i", str(speech_audio_path),
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
-        "-ac", "2",
-        "-shortest",
-        str(out_path)
-    ]
-    subprocess.run(mux_cmd, check=True)
+    if mux_audio:
+        print(f"[Scene 1/3] Muxing speech audio (0.0s -> {intro_duration:.2f}s) into intro clip...")
+        mux_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(render_target),
+            "-ss", "0",
+            "-t", f"{intro_duration:.3f}",
+            "-i", str(speech_audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "48000",
+            "-ac", "2",
+            "-shortest",
+            str(out_path)
+        ]
+        subprocess.run(mux_cmd, check=True)
 
-    if raw_intro.exists():
-        raw_intro.unlink()
+        if render_target.exists():
+            render_target.unlink()
     print(f"[Scene 1/3] Finished: {out_path.name}")
 
 
-def render_watermark_still(surah_name: str, verse_range: str, out_path: Path):
+def render_watermark_still(
+    surah_name: str,
+    verse_range: str,
+    out_path: Path,
+    bundle_dir: Path | None = None,
+):
     """Step 2: Render 1920x1080 transparent PNG watermark using Remotion Still."""
     props = {
         "surah_name": surah_name,
@@ -268,54 +319,110 @@ def render_watermark_still(surah_name: str, verse_range: str, out_path: Path):
     props_path = REMOTION_DIR / "tmp_watermark_props.json"
     props_path.write_text(json.dumps(props, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    entry = str(bundle_dir) if bundle_dir is not None else "src/index.ts"
     cmd = [
         "npx", "remotion", "still",
-        "src/index.ts", "SpeechWatermark",
+        entry, "SpeechWatermark",
         str(out_path),
         f"--props={props_path}",
     ]
-    chromium_path = os.environ.get("REMOTION_CHROMIUM_EXECUTABLE_PATH", "/usr/bin/chromium")
-    if Path(chromium_path).exists():
-        cmd.append(f"--browser-executable={chromium_path}")
+    cmd.extend(get_remotion_common_args(include_concurrency=False))
 
     print(f"[Watermark] Rendering top-left watermark still ({surah_name}, আয়াত {verse_range})...")
     subprocess.run(cmd, cwd=REMOTION_DIR, check=True)
     print(f"[Watermark] Finished: {out_path.name}")
 
 
-def render_extro_scene(out_path: Path):
-    """Step 3: Render Extro scene (~13.7s) via Remotion."""
+def is_extro_cache_valid(out_path: Path, require_audio: bool = False) -> bool:
+    """Checks if cached Extro clip is newer than all Extro source files and passes stream validation."""
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        return False
+
+    out_mtime = out_path.stat().st_mtime
+    src_dir = REMOTION_DIR / "src"
+    deps = [
+        src_dir / "ExtroScene.tsx",
+        src_dir / "ExtroSlide.tsx",
+        src_dir / "ChannelWatermark.tsx",
+        src_dir / "intro_bg_1080.png",
+        src_dir / "icb_logo.png",
+        src_dir / "extro_invite.mp3",
+        src_dir / "extro_verse.mp3",
+    ]
+    for dep in deps:
+        if dep.exists() and dep.stat().st_mtime > out_mtime:
+            return False
+
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=codec_type,nb_frames",
+        "-of", "json",
+        str(out_path),
+    ]
+    try:
+        res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+        streams = json.loads(res.stdout).get("streams", [])
+    except Exception:
+        return False
+
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    if not video_streams:
+        return False
+    try:
+        if int(video_streams[0].get("nb_frames", 0)) != EXTRO_TOTAL_FRAMES:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if require_audio and not audio_streams:
+        return False
+    return True
+
+
+def render_extro_scene(
+    out_path: Path,
+    bundle_dir: Path | None = None,
+    mux_audio: bool = True,
+    force: bool = False,
+):
+    """Step 3: Render Extro scene (~13.7s) via Remotion, reusing valid cached output when allowed."""
+    if not force and is_extro_cache_valid(out_path, require_audio=mux_audio):
+        print(f"[Scene 3/3] Reusing cached Extro clip: {out_path.name}")
+        return
+
     config_path = write_clean_config()
-    raw_extro = OUTPUT_DIR / "extro_raw.mp4"
+    entry = str(bundle_dir) if bundle_dir is not None else "src/index.ts"
+    render_target = (OUTPUT_DIR / "extro_raw.mp4") if mux_audio else out_path
 
     cmd = [
         "npx", "remotion", "render",
-        "src/index.ts", "ExtroScene",
-        str(raw_extro),
+        entry, "ExtroScene",
+        str(render_target),
         f"--config={config_path}",
         "--codec=h264",
     ]
-    chromium_path = os.environ.get("REMOTION_CHROMIUM_EXECUTABLE_PATH", "/usr/bin/chromium")
-    if Path(chromium_path).exists():
-        cmd.append(f"--browser-executable={chromium_path}")
+    if not mux_audio:
+        cmd.append("--muted")
+    cmd.extend(get_remotion_common_args(include_concurrency=True))
 
     print("[Scene 3/3] Rendering Extro scene (~13.7s) via Remotion...")
     subprocess.run(cmd, cwd=REMOTION_DIR, check=True)
 
-    norm_cmd = [
-        "ffmpeg", "-y",
-        "-i", str(raw_extro),
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
-        "-ac", "2",
-        str(out_path)
-    ]
-    subprocess.run(norm_cmd, check=True)
+    if mux_audio:
+        norm_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(render_target),
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "48000",
+            "-ac", "2",
+            str(out_path)
+        ]
+        subprocess.run(norm_cmd, check=True)
 
-    if raw_extro.exists():
-        raw_extro.unlink()
+        if render_target.exists():
+            render_target.unlink()
     print(f"[Scene 3/3] Finished: {out_path.name}")
 
 
@@ -339,6 +446,35 @@ def get_video_frame_count(path: Path) -> int:
     return max(1, round(dur * FPS))
 
 
+def _encode_speech_segment(
+    speech_bg_path: Path,
+    watermark_path: Path,
+    channel_logo_path: Path | None,
+    has_logo: bool,
+    filter_complex: str,
+    vframes: int,
+    out_path: Path,
+    loop_bg: bool = False,
+):
+    """Encodes a single head/body/tail video-only segment for the speech scene."""
+    cmd = ["ffmpeg", "-y"]
+    if loop_bg:
+        cmd.extend(["-stream_loop", "-1"])
+    cmd.extend(["-i", str(speech_bg_path), "-loop", "1", "-i", str(watermark_path)])
+    if has_logo:
+        cmd.extend(["-loop", "1", "-i", str(channel_logo_path)])
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        "-vframes", str(vframes),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-video_track_timescale", "90000",
+        str(out_path),
+    ])
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def render_speech_scene(
     speech_bg_path: Path,
     watermark_path: Path,
@@ -347,15 +483,15 @@ def render_speech_scene(
     speech_audio_remaining: float,
     speech_scene_duration: float,
     out_path: Path,
-    channel_logo_path: Path = None
+    channel_logo_path: Path = None,
+    mux_audio: bool = True,
 ):
-    """Step 4: Render Scene 2 (Main Speech) using Option A Loop Stream-Copy.
+    """Step 4: Render Scene 2 (Main Speech) using Loop Stream-Copy.
     - Encodes Head (152 frames / ~5.07s) with fade-in and watermark fade
-    - Encodes Body loop unit (152 frames / ~5.07s) with watermark
+    - Encodes Body loop unit (152 frames / ~5.07s) with watermark and repeats via -stream_loop
     - Encodes Tail (remainder frames) with fade-out
-    - Stream-copies sequence with -c copy in ~3-4 seconds
-    - Muxes speech audio with silence padding in ~1.5 seconds
-    Total render time: ~8 seconds (down from ~7.5 minutes).
+    - Stream-copies sequence with -c copy
+    - Optionally muxes speech audio with silence padding (for standalone --speech-only)
     """
     if channel_logo_path is None:
         try:
@@ -365,6 +501,9 @@ def render_speech_scene(
 
     has_logo = channel_logo_path is not None and channel_logo_path.exists()
     logo_overlay_pos = f"W-w-{CHANNEL_LOGO_RIGHT}:H-h-{CHANNEL_LOGO_BOTTOM}"
+    logo_filter = (
+        f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+    )
 
     total_speech_frames = round(speech_scene_duration * FPS)
     loop_frames = get_video_frame_count(speech_bg_path)
@@ -379,6 +518,7 @@ def render_speech_scene(
     try:
         temp_head = OUTPUT_DIR / "temp_speech_head.mp4"
         temp_body = OUTPUT_DIR / "temp_speech_body.mp4"
+        temp_body_looped = OUTPUT_DIR / "temp_speech_body_looped.mp4"
         temp_tail = OUTPUT_DIR / "temp_speech_tail.mp4"
         temp_video_raw = OUTPUT_DIR / "temp_speech_video_raw.mp4"
         speech_concat_list = OUTPUT_DIR / "speech_loop_concat.txt"
@@ -406,23 +546,10 @@ def render_speech_scene(
                 f"[0:v]{scale_filter}[bg];"
                 f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
                 f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
-                f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+                f"{logo_filter}"
                 f"[bg_faded][wm]overlay=0:0[bg_wm];"
                 f"[bg_wm][logo]overlay={logo_overlay_pos}[outv]"
             )
-            cmd_head = [
-                "ffmpeg", "-y",
-                "-i", str(speech_bg_path),
-                "-loop", "1", "-i", str(watermark_path),
-                "-loop", "1", "-i", str(channel_logo_path),
-                "-filter_complex", head_filter,
-                "-map", "[outv]",
-                "-vframes", str(head_frames),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", "-r", str(FPS),
-                "-video_track_timescale", "90000",
-                str(temp_head)
-            ]
         else:
             head_filter = (
                 f"[0:v]{scale_filter}[bg];"
@@ -430,60 +557,41 @@ def render_speech_scene(
                 f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
                 f"[bg_faded][wm]overlay=0:0[outv]"
             )
-            cmd_head = [
-                "ffmpeg", "-y",
-                "-i", str(speech_bg_path),
-                "-loop", "1", "-i", str(watermark_path),
-                "-filter_complex", head_filter,
-                "-map", "[outv]",
-                "-vframes", str(head_frames),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", "-r", str(FPS),
-                "-video_track_timescale", "90000",
-                str(temp_head)
-            ]
-        subprocess.run(cmd_head, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _encode_speech_segment(
+            speech_bg_path, watermark_path, channel_logo_path, has_logo,
+            head_filter, head_frames, temp_head, loop_bg=False,
+        )
 
         # 2. Body Unit (152 frames) - only if loops are needed
+        body_concat_name = temp_body.name
         if num_loops > 0:
             if has_logo:
                 body_filter = (
                     f"[0:v]{scale_filter}[bg];"
-                    f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+                    f"{logo_filter}"
                     f"[bg][1:v]overlay=0:0[bg_wm];"
                     f"[bg_wm][logo]overlay={logo_overlay_pos}[outv]"
                 )
-                cmd_body = [
-                    "ffmpeg", "-y",
-                    "-i", str(speech_bg_path),
-                    "-loop", "1", "-i", str(watermark_path),
-                    "-loop", "1", "-i", str(channel_logo_path),
-                    "-filter_complex", body_filter,
-                    "-map", "[outv]",
-                    "-vframes", str(loop_frames),
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p", "-r", str(FPS),
-                    "-video_track_timescale", "90000",
-                    str(temp_body)
-                ]
             else:
                 body_filter = (
                     f"[0:v]{scale_filter}[bg];"
                     f"[bg][1:v]overlay=0:0[outv]"
                 )
-                cmd_body = [
+            _encode_speech_segment(
+                speech_bg_path, watermark_path, channel_logo_path, has_logo,
+                body_filter, loop_frames, temp_body, loop_bg=False,
+            )
+            if num_loops > 1:
+                cmd_loop = [
                     "ffmpeg", "-y",
-                    "-i", str(speech_bg_path),
-                    "-loop", "1", "-i", str(watermark_path),
-                    "-filter_complex", body_filter,
-                    "-map", "[outv]",
-                    "-vframes", str(loop_frames),
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p", "-r", str(FPS),
+                    "-stream_loop", str(num_loops - 1),
+                    "-i", str(temp_body),
+                    "-c", "copy",
                     "-video_track_timescale", "90000",
-                    str(temp_body)
+                    str(temp_body_looped),
                 ]
-            subprocess.run(cmd_body, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(cmd_loop, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                body_concat_name = temp_body_looped.name
 
         # 3. Tail Segment (tail_frames) - with fade-out in final 30 frames (1.0s)
         if tail_frames > 0:
@@ -494,51 +602,30 @@ def render_speech_scene(
                     f"[0:v]{scale_filter}[bg];"
                     f"[bg][1:v]overlay=0:0[bg_wm];"
                     f"[bg_wm]fade=t=out:st={tail_fade_st:.3f}:d=1.0[bg_faded];"
-                    f"[2:v]scale={CHANNEL_LOGO_WIDTH}:-1,format=rgba,colorchannelmixer=aa={CHANNEL_LOGO_OPACITY}[logo];"
+                    f"{logo_filter}"
                     f"[bg_faded][logo]overlay={logo_overlay_pos}[outv]"
                 )
-                cmd_tail = [
-                    "ffmpeg", "-y",
-                    "-stream_loop", "-1", "-i", str(speech_bg_path),
-                    "-loop", "1", "-i", str(watermark_path),
-                    "-loop", "1", "-i", str(channel_logo_path),
-                    "-filter_complex", tail_filter,
-                    "-map", "[outv]",
-                    "-vframes", str(tail_frames),
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p", "-r", str(FPS),
-                    "-video_track_timescale", "90000",
-                    str(temp_tail)
-                ]
             else:
                 tail_filter = (
                     f"[0:v]{scale_filter}[bg];"
                     f"[bg][1:v]overlay=0:0[with_wm];"
                     f"[with_wm]fade=t=out:st={tail_fade_st:.3f}:d=1.0[outv]"
                 )
-                cmd_tail = [
-                    "ffmpeg", "-y",
-                    "-stream_loop", "-1", "-i", str(speech_bg_path),
-                    "-loop", "1", "-i", str(watermark_path),
-                    "-filter_complex", tail_filter,
-                    "-map", "[outv]",
-                    "-vframes", str(tail_frames),
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p", "-r", str(FPS),
-                    "-video_track_timescale", "90000",
-                    str(temp_tail)
-                ]
-            subprocess.run(cmd_tail, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _encode_speech_segment(
+                speech_bg_path, watermark_path, channel_logo_path, has_logo,
+                tail_filter, tail_frames, temp_tail, loop_bg=True,
+            )
 
-        # 4. Concat manifest
+        # 4. Concat manifest (at most 3 entries: head, looped body, tail)
         with open(speech_concat_list, "w", encoding="utf-8") as f:
             f.write(f"file '{temp_head.name}'\n")
-            for _ in range(num_loops):
-                f.write(f"file '{temp_body.name}'\n")
+            if num_loops > 0:
+                f.write(f"file '{body_concat_name}'\n")
             if tail_frames > 0:
                 f.write(f"file '{temp_tail.name}'\n")
 
         # 5. Stream-copy video assembly
+        assemble_target = temp_video_raw if mux_audio else out_path
         cmd_assemble = [
             "ffmpeg", "-y",
             "-f", "concat",
@@ -546,33 +633,34 @@ def render_speech_scene(
             "-i", str(speech_concat_list),
             "-c", "copy",
             "-video_track_timescale", "90000",
-            str(temp_video_raw)
+            str(assemble_target)
         ]
         subprocess.run(cmd_assemble, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 6. Mux speech audio (sliced + padded) into output clip
-        audio_filter = f"[0:a]apad=whole_dur={speech_scene_duration:.3f},atrim=0:{speech_scene_duration:.3f}[outa]"
-        cmd_mux = [
-            "ffmpeg", "-y",
-            "-ss", f"{intro_duration:.3f}",
-            "-t", f"{speech_audio_remaining:.3f}",
-            "-i", str(speech_audio_path),
-            "-i", str(temp_video_raw),
-            "-filter_complex", audio_filter,
-            "-map", "1:v:0",
-            "-map", "[outa]",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-ar", "48000",
-            "-ac", "2",
-            "-shortest",
-            str(out_path)
-        ]
-        subprocess.run(cmd_mux, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 6. Mux speech audio (sliced + padded) only when requested (--speech-only)
+        if mux_audio:
+            audio_filter = f"[0:a]apad=whole_dur={speech_scene_duration:.3f},atrim=0:{speech_scene_duration:.3f}[outa]"
+            cmd_mux = [
+                "ffmpeg", "-y",
+                "-ss", f"{intro_duration:.3f}",
+                "-t", f"{speech_audio_remaining:.3f}",
+                "-i", str(speech_audio_path),
+                "-i", str(temp_video_raw),
+                "-filter_complex", audio_filter,
+                "-map", "1:v:0",
+                "-map", "[outa]",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "48000",
+                "-ac", "2",
+                "-shortest",
+                str(out_path)
+            ]
+            subprocess.run(cmd_mux, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Cleanup temps
-        for tmp in [temp_head, temp_body, temp_tail, temp_video_raw, speech_concat_list]:
+        for tmp in [temp_head, temp_body, temp_body_looped, temp_tail, temp_video_raw, speech_concat_list]:
             if tmp.exists():
                 tmp.unlink()
 
@@ -581,39 +669,51 @@ def render_speech_scene(
     except Exception as e:
         print(f"[Scene 2/3] Loop Stream-Copy failed ({e}), falling back to direct render...")
         fade_out_start = max(0.0, speech_scene_duration - 1.0)
-        filter_complex = (
-            f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps={FPS}[bg];"
-            f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
-            f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
-            f"[bg_faded][wm]overlay=0:0[with_wm];"
-            f"[with_wm]fade=t=out:st={fade_out_start:.3f}:d=1.0,trim=0:{speech_scene_duration:.3f}[outv];"
-            f"[2:a]apad=whole_dur={speech_scene_duration:.3f},atrim=0:{speech_scene_duration:.3f}[outa]"
-        )
-        cmd_fallback = [
-            "ffmpeg", "-y",
-            "-stream_loop", "-1",
-            "-i", str(speech_bg_path),
-            "-loop", "1",
-            "-i", str(watermark_path),
-            "-ss", f"{intro_duration:.3f}",
-            "-t", f"{speech_audio_remaining:.3f}",
-            "-i", str(speech_audio_path),
-            "-filter_complex", filter_complex,
-            "-map", "[outv]",
-            "-map", "[outa]",
-            "-t", f"{speech_scene_duration:.3f}",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-r", str(FPS),
-            "-video_track_timescale", "90000",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-ar", "48000",
-            "-ac", "2",
-            str(out_path)
-        ]
+        if mux_audio:
+            filter_complex = (
+                f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps={FPS}[bg];"
+                f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
+                f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
+                f"[bg_faded][wm]overlay=0:0[with_wm];"
+                f"[with_wm]fade=t=out:st={fade_out_start:.3f}:d=1.0,trim=0:{speech_scene_duration:.3f}[outv];"
+                f"[2:a]apad=whole_dur={speech_scene_duration:.3f},atrim=0:{speech_scene_duration:.3f}[outa]"
+            )
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-stream_loop", "-1", "-i", str(speech_bg_path),
+                "-loop", "1", "-i", str(watermark_path),
+                "-ss", f"{intro_duration:.3f}",
+                "-t", f"{speech_audio_remaining:.3f}",
+                "-i", str(speech_audio_path),
+                "-filter_complex", filter_complex,
+                "-map", "[outv]", "-map", "[outa]",
+                "-t", f"{speech_scene_duration:.3f}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-r", str(FPS),
+                "-video_track_timescale", "90000",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                str(out_path)
+            ]
+        else:
+            filter_complex = (
+                f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps={FPS}[bg];"
+                f"[bg]fade=t=in:st=0:d=1.0[bg_faded];"
+                f"[1:v]fade=t=in:st=1.0:d=0.5:alpha=1[wm];"
+                f"[bg_faded][wm]overlay=0:0[with_wm];"
+                f"[with_wm]fade=t=out:st={fade_out_start:.3f}:d=1.0,trim=0:{speech_scene_duration:.3f}[outv]"
+            )
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-stream_loop", "-1", "-i", str(speech_bg_path),
+                "-loop", "1", "-i", str(watermark_path),
+                "-filter_complex", filter_complex,
+                "-map", "[outv]",
+                "-t", f"{speech_scene_duration:.3f}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-r", str(FPS),
+                "-video_track_timescale", "90000",
+                str(out_path)
+            ]
         subprocess.run(cmd_fallback, check=True)
         print(f"[Scene 2/3] Finished fallback render: {out_path.name}")
 
@@ -654,31 +754,42 @@ def render_master_audio(
     extro_invite_path: Path,
     extro_verse_path: Path,
     out_path: Path,
-    silence_dur: float = SILENCE_DURATION
+    silence_dur: float = SILENCE_DURATION,
+    aac_out_path: Path | None = None,
 ):
     """Renders master continuous podcast audio for the entire program:
     [speech_audio] + [silence_dur] + [extro_invite] + [extro_verse]
-    Formatted to 48000Hz stereo MP3 (192kbps).
+    Formatted to 48000Hz stereo MP3 (192kbps), and optionally also 48000Hz stereo AAC in a single pass.
     """
-    filter_complex = (
+    base_filter = (
         f"[0:a]aformat=sample_rates=48000:channel_layouts=stereo,apad=pad_dur={silence_dur:.3f}[a0_padded];"
         f"[1:a]volume={EXTRO_INVITE_VOLUME},aformat=sample_rates=48000:channel_layouts=stereo[a1_fmt];"
         f"[2:a]volume={EXTRO_VERSE_VOLUME},aformat=sample_rates=48000:channel_layouts=stereo[a2_fmt];"
-        f"[a0_padded][a1_fmt][a2_fmt]concat=n=3:v=0:a=1[outa]"
     )
+    if aac_out_path is not None:
+        filter_complex = base_filter + "[a0_padded][a1_fmt][a2_fmt]concat=n=3:v=0:a=1,asplit=2[outa_mp3][outa_aac]"
+        output_args = [
+            "-map", "[outa_mp3]", "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", str(out_path),
+            "-map", "[outa_aac]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", str(aac_out_path),
+        ]
+        label = f"{out_path.name} + {aac_out_path.name}"
+    else:
+        filter_complex = base_filter + "[a0_padded][a1_fmt][a2_fmt]concat=n=3:v=0:a=1[outa]"
+        output_args = [
+            "-map", "[outa]", "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", str(out_path),
+        ]
+        label = out_path.name
+
     cmd = [
         "ffmpeg", "-y",
+        "-loglevel", "warning", "-nostats",
         "-i", str(speech_audio_path),
         "-i", str(extro_invite_path),
         "-i", str(extro_verse_path),
         "-filter_complex", filter_complex,
-        "-map", "[outa]",
-        "-c:a", "libmp3lame",
-        "-b:a", "192k",
-        "-ar", "48000",
-        str(out_path)
+        *output_args,
     ]
-    print(f"[Master Audio] Rendering complete podcast audio -> {out_path.name}...")
+    print(f"[Master Audio] Rendering complete podcast audio -> {label}...")
     subprocess.run(cmd, check=True)
 
     print(f"[Master Audio] Done! Podcast audio ready at: {out_path}")
@@ -689,9 +800,10 @@ def concatenate_scenes(
     speech_path: Path,
     extro_path: Path,
     master_audio_path: Path,
-    final_video_path: Path
+    final_video_path: Path,
+    master_audio_aac_path: Path | None = None,
 ):
-    """Step 5: Concatenates Scene 1 + 2 + 3 video tracks and muxes with master audio."""
+    """Step 5: Concatenates Scene 1 + 2 + 3 video tracks and muxes with master audio in one pass."""
     ensure_clip_timescale(intro_path, 90000)
     ensure_clip_timescale(speech_path, 90000)
     ensure_clip_timescale(extro_path, 90000)
@@ -702,57 +814,49 @@ def concatenate_scenes(
         f.write(f"file '{speech_path.name}'\n")
         f.write(f"file '{extro_path.name}'\n")
 
+    if master_audio_aac_path is not None and master_audio_aac_path.exists():
+        audio_in = master_audio_aac_path
+        audio_codec_args = ["-c:a", "copy"]
+    else:
+        audio_in = master_audio_path
+        audio_codec_args = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
 
-    temp_video_track = OUTPUT_DIR / "temp_video_track.mp4"
-    cmd_video = [
+    cmd_final = [
         "ffmpeg", "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_list_file),
+        "-i", str(audio_in),
         "-map", "0:v:0",
+        "-map", "1:a:0",
         "-c:v", "copy",
+        *audio_codec_args,
         "-video_track_timescale", "90000",
-        str(temp_video_track)
+        "-shortest",
+        str(final_video_path),
     ]
 
-    print(f"[Assembly] Concatenating video scenes into video track...")
+    print(f"[Assembly] Concatenating video scenes and muxing master audio into: {final_video_path.name}...")
     try:
-        subprocess.run(cmd_video, check=True)
+        subprocess.run(cmd_final, check=True)
     except subprocess.CalledProcessError:
-        print("[Assembly] Direct stream copy video concat failed. Falling back to filter concat...")
+        print("[Assembly] Direct stream copy concat failed. Falling back to filter concat...")
         filter_cmd = [
             "ffmpeg", "-y",
             "-i", str(intro_path),
             "-i", str(speech_path),
             "-i", str(extro_path),
-            "-filter_complex",
-            "[0:v][1:v][2:v]concat=n=3:v=1:a=0[outv]",
+            "-i", str(audio_in),
+            "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[outv]",
             "-map", "[outv]",
+            "-map", "3:a:0",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *audio_codec_args,
             "-video_track_timescale", "90000",
-            str(temp_video_track)
+            "-shortest",
+            str(final_video_path),
         ]
         subprocess.run(filter_cmd, check=True)
-
-    print(f"[Assembly] Muxing master audio with assembled video into: {final_video_path.name}...")
-    mux_cmd = [
-        "ffmpeg", "-y",
-        "-i", str(temp_video_track),
-        "-i", str(master_audio_path),
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
-        "-shortest",
-        str(final_video_path)
-    ]
-    subprocess.run(mux_cmd, check=True)
-
-    if temp_video_track.exists():
-        temp_video_track.unlink()
-
 
     print(f"[Assembly] Done! Final video ready at: {final_video_path}")
 
@@ -909,6 +1013,7 @@ def main():
 
     final_video_path = OUTPUT_DIR / f"final_video_{date_suffix}.mp4"
     final_audio_path = OUTPUT_DIR / f"final_audio_{date_suffix}.mp3"
+    master_audio_aac_path = OUTPUT_DIR / "master_audio.m4a"
 
     extro_invite_path = find_asset("extro_invite.mp3")
     extro_verse_path = find_asset("extro_verse.mp3")
@@ -931,7 +1036,7 @@ def main():
         render_watermark_still(surah_name, verse_range, watermark_png_path)
         return
     if args.extro_only:
-        render_extro_scene(extro_clip_path)
+        render_extro_scene(extro_clip_path, mux_audio=True, force=True)
         return
     if args.speech_only:
         if not watermark_png_path.exists():
@@ -947,32 +1052,56 @@ def main():
         return
     if args.assemble_only:
         if not final_audio_path.exists():
-            render_master_audio(speech_audio_path, extro_invite_path, extro_verse_path, final_audio_path)
-        concatenate_scenes(intro_clip_path, speech_clip_path, extro_clip_path, final_audio_path, final_video_path)
+            render_master_audio(
+                speech_audio_path, extro_invite_path, extro_verse_path,
+                final_audio_path, aac_out_path=master_audio_aac_path,
+            )
+        concatenate_scenes(
+            intro_clip_path, speech_clip_path, extro_clip_path,
+            final_audio_path, final_video_path,
+            master_audio_aac_path=master_audio_aac_path,
+        )
         return
 
     # Full End-to-End Pipeline
-    # 1. Scene 1: Intro + Verses
-    render_intro_scene(props, speech_audio_path, intro_duration, intro_clip_path)
+    bundle_dir = ensure_remotion_bundle()
+    try:
+        # 1. Watermark Still PNG (unblocks Scene 2 immediately)
+        render_watermark_still(surah_name, verse_range, watermark_png_path, bundle_dir=bundle_dir)
 
-    # 2. Watermark Still PNG
-    render_watermark_still(surah_name, verse_range, watermark_png_path)
+        # 2. Launch Master Audio (MP3 + AAC) and Scene 2 (Main Speech video-only) in background
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_audio = executor.submit(
+                render_master_audio,
+                speech_audio_path, extro_invite_path, extro_verse_path,
+                final_audio_path, SILENCE_DURATION, master_audio_aac_path,
+            )
+            future_speech = executor.submit(
+                render_speech_scene,
+                speech_bg_path, watermark_png_path, speech_audio_path,
+                intro_duration, speech_audio_remaining, speech_scene_duration,
+                speech_clip_path, channel_logo_path, False,
+            )
 
-    # 3. Scene 3: Extro
-    render_extro_scene(extro_clip_path)
+            # 3. Render Scene 1 (Intro + Verses) and Scene 3 (Extro) video-only on main thread
+            render_intro_scene(
+                props, speech_audio_path, intro_duration, intro_clip_path,
+                bundle_dir=bundle_dir, mux_audio=False,
+            )
+            render_extro_scene(extro_clip_path, bundle_dir=bundle_dir, mux_audio=False)
 
-    # 4. Scene 2: Main Speech
-    render_speech_scene(
-        speech_bg_path, watermark_png_path, speech_audio_path,
-        intro_duration, speech_audio_remaining, speech_scene_duration,
-        speech_clip_path, channel_logo_path
-    )
+            future_speech.result()
+            future_audio.result()
 
-    # 5. Master Podcast Audio: speech + 1.5s silence + extro_invite + extro_verse
-    render_master_audio(speech_audio_path, extro_invite_path, extro_verse_path, final_audio_path)
-
-    # 6. Final Video + Audio Assembly
-    concatenate_scenes(intro_clip_path, speech_clip_path, extro_clip_path, final_audio_path, final_video_path)
+        # 4. Final Video + Audio Assembly (single-pass stream copy)
+        concatenate_scenes(
+            intro_clip_path, speech_clip_path, extro_clip_path,
+            final_audio_path, final_video_path,
+            master_audio_aac_path=master_audio_aac_path,
+        )
+    finally:
+        if str(bundle_dir).startswith("/tmp/") and bundle_dir.exists():
+            shutil.rmtree(bundle_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
