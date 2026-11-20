@@ -39,6 +39,7 @@ This tool transforms a weekly Quran tafseer lecture audio file and metadata JSON
 │   ├── final_audio_YYYY_MM_DD.mp3   # Master podcast audio
 │   └── ...                          # Intermediate cached clips
 ├── python/
+│   ├── enhance_audio.py             # Automated Adobe Podcast audio enhancer (Microsoft Edge + Playwright + FFmpeg)
 │   ├── generate_input.py            # Automated verse timestamp & input JSON generator (Groq Whisper + Qwen)
 │   ├── publish_youtube.py           # Automated YouTube metadata & publishing tool
 │   └── render_verses.py             # Master orchestrator script
@@ -70,6 +71,17 @@ Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS
 ### 2. Prepare Weekly Inputs
 In the `inputs/` folder, place:
 1. **Exactly one audio file** (`.mp3`, `.wav`, or `.m4a`) containing the lecture speech.
+   * **Optional — Automated Audio Enhancement (Adobe Podcast Enhance Speech)**:
+     Place your raw recording in `inputs/` with a `-raw` suffix (e.g. `inputs/12. BUET Tafsir 2026-11-11-raw.mp3`) and run on your macOS host:
+     ```bash
+     # First-time setup (host Python):
+     pip3 install playwright
+     python3 python/enhance_audio.py --login-only   # Sign in once in Microsoft Edge
+
+     # Weekly enhancement:
+     python3 python/enhance_audio.py
+     ```
+     *Automatically checks duration, splits clips > 29.5 min near a natural pause, enhances each chunk sequentially on `podcast.adobe.com/en/enhance`, joins them into `inputs/12. BUET Tafsir 2026-11-11.mp3`, and archives the raw clip to `inputs/raw_archive/` (pass `--delete-raw` to delete instead).*
 2. **Generate the input JSON** (`inputs/tafsir_YYYY_MM_DD.json`):
    * **Recommended (Automated)**: Run the AI generator to auto-extract timestamps and split verses:
      ```bash

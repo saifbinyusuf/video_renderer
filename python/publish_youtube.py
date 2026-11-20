@@ -21,6 +21,7 @@ import sys
 import json
 import time
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import subprocess
 import urllib.parse
 import threading
@@ -138,6 +139,88 @@ def extract_code_from_redirect(user_input: str) -> str:
     return raw
 
 
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Multi-threaded HTTP server for OAuth callbacks that won't deadlock on idle browser sockets."""
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def run_threaded_oauth_server(
+    flow: InstalledAppFlow,
+    host: str = "localhost",
+    bind_addr: str = "0.0.0.0",
+    port: int = 8080,
+    timeout_seconds: int = 180,
+):
+    """Runs a multi-threaded local OAuth callback server so speculative browser preconnects cannot deadlock auth."""
+    flow.redirect_uri = f"http://{host}:{port}/"
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+
+    received_event = threading.Event()
+    result = {"path": None, "error": None}
+    result_lock = threading.Lock()
+
+    class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+        def setup(self):
+            self.request.settimeout(5.0)
+            super().setup()
+
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+
+            if "code" in params or "error" in params:
+                with result_lock:
+                    if not received_event.is_set():
+                        result["path"] = self.path
+                        result["error"] = params.get("error", [None])[0]
+                        received_event.set()
+
+                if result["error"]:
+                    body = (
+                        "<html><body><h2>Authorization failed</h2>"
+                        "<p>You may close this window and check the terminal.</p></body></html>"
+                    ).encode("utf-8")
+                else:
+                    body = (
+                        "<html><body><h2>Authorization complete!</h2>"
+                        "<p>You may close this window and return to the terminal.</p></body></html>"
+                    ).encode("utf-8")
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(204)
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+    server = _ReusableThreadingHTTPServer((bind_addr, port), _OAuthCallbackHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        print(f"Please visit this URL to authorize this application: {auth_url}", flush=True)
+        if not received_event.wait(timeout=timeout_seconds):
+            raise TimeoutError(f"Timed out after {timeout_seconds}s waiting for OAuth callback on port {port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    if result["error"]:
+        raise RuntimeError(f"Google OAuth returned error: {result['error']}")
+
+    authorization_response = f"https://{host}:{port}{result['path']}"
+    flow.fetch_token(authorization_response=authorization_response)
+    return flow.credentials
+
+
 def get_authenticated_service():
     creds = None
     if TOKEN_FILE.exists() and TOKEN_FILE.is_file() and TOKEN_FILE.stat().st_size > 0:
@@ -180,14 +263,12 @@ def get_authenticated_service():
 
             creds = None
             try:
-                creds = flow.run_local_server(
+                creds = run_threaded_oauth_server(
+                    flow,
                     host="localhost",
-                    port=8080,
                     bind_addr="0.0.0.0",
-                    open_browser=False,
-                    timeout_seconds=120,
-                    prompt="consent",
-                    access_type="offline"
+                    port=8080,
+                    timeout_seconds=180,
                 )
             except Exception as ex:
                 print(f"\n[Auth] Automatic redirect server didn't complete ({ex}).")
