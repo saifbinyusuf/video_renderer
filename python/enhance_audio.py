@@ -7,19 +7,30 @@ Workflow:
   3. Opens https://podcast.adobe.com/en/enhance in Microsoft Edge (dedicated persistent profile).
   4. Uploads each chunk sequentially, waits for Adobe enhancement, and downloads the enhanced MP3.
   5. Joins downloaded chunks (if split) and saves the final MP3 without the "-raw" suffix.
-  6. Archives the original raw clip to inputs/raw_archive/ (or deletes it with --delete-raw).
+  6. Uploads the raw clip to Google Drive (separate account, e.g. icb.mail.info@gmail.com).
+  7. Archives the original raw clip to inputs/raw_archive/ (or deletes it with --delete-raw).
 """
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import mimetypes
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
 from pathlib import Path
+
+try:
+    import dotenv
+    dotenv.load_dotenv()
+except ImportError:
+    pass
 
 ADOBE_ENHANCE_URL = "https://podcast.adobe.com/en/enhance"
 EDGE_APP_EXECUTABLE = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
@@ -29,6 +40,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 INPUTS_DIR = PROJECT_ROOT / "inputs"
 OUTPUT_DIR = PROJECT_ROOT / "output"
+
+# Google Drive Upload Defaults (separate from Adobe Podcast account)
+DEFAULT_DRIVE_FOLDER_ID = os.environ.get("DRIVE_RAW_FOLDER_ID", "1GtOYA7-UkNrsS6yxUdpKPuO0qf6DtJb3")
+DEFAULT_DRIVE_ACCOUNT = os.environ.get("DRIVE_ACCOUNT_EMAIL", "icb.mail.info@gmail.com")
+DRIVE_CLIENT_SECRET_FILE = PROJECT_ROOT / os.environ.get("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json")
+DRIVE_TOKEN_FILE = PROJECT_ROOT / "token_drive.json"
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+DRIVE_OAUTH_PORT = 8085
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 RAW_SUFFIX_RE = re.compile(r"(?:[-_\s]+raw)$", re.IGNORECASE)
@@ -226,7 +245,7 @@ def run_manual_edge_login(profile_dir: Path):
     print("1. A dedicated Microsoft Edge window will open to Adobe Podcast Enhance.")
     print("2. Sign in with your Google account (e.g. saifsearcher@gmail.com).")
     print("3. Confirm you can see the Enhance Speech upload screen.")
-    print("4. Close that Edge window (Cmd+Q or close all its tabs) when done.")
+    print("4. Return here and press Enter (or quit Edge with Cmd+Q) to save & close.")
     print("=" * 68 + "\n")
 
     proc = subprocess.Popen(
@@ -235,11 +254,27 @@ def run_manual_edge_login(profile_dir: Path):
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-edgeupdater",
             ADOBE_ENHANCE_URL,
-        ]
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    proc.wait()
-    print("[Login] Edge closed. Session saved to dedicated profile.")
+
+    try:
+        input("Press Enter once you are signed in and see the Enhance upload screen...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    print("[Login] Edge closed cleanly. Session saved to dedicated profile.")
 
 
 def _find_visible_locator(page, selectors: list[str], timeout_ms: int = 2000):
@@ -409,14 +444,22 @@ def enhance_chunks_in_edge(
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(ADOBE_ENHANCE_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Give Adobe's SPA + silent SSO a few seconds to hydrate before deciding auth is missing
-            hydrate_deadline = time.time() + 10.0
-            while time.time() < hydrate_deadline:
-                if _is_logged_in_enhance_ready(page):
+            # Give Adobe's SPA + silent IMS token refresh time to hydrate (reload once if stalled)
+            ready = False
+            for attempt, wait_sec in enumerate((12.0, 10.0), start=1):
+                hydrate_deadline = time.time() + wait_sec
+                while time.time() < hydrate_deadline:
+                    if _is_logged_in_enhance_ready(page):
+                        ready = True
+                        break
+                    time.sleep(1.0)
+                if ready:
                     break
-                time.sleep(1.0)
+                if attempt == 1:
+                    print("[Edge] Waiting for Adobe silent session refresh (reloading once)...")
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
 
-            if not _is_logged_in_enhance_ready(page):
+            if not ready:
                 print("\n[Auth] Adobe Podcast Enhance upload screen not detected (sign-in may be required).")
                 print("       Sign in inside the open Edge window, or cancel and run:")
                 print("       python3 python/enhance_audio.py --login-only")
@@ -542,6 +585,198 @@ def verify_output(output_path: Path, expected_duration: float):
     )
 
 
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Multi-threaded local OAuth callback server that will not deadlock on idle browser sockets."""
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def _run_drive_oauth_server(flow, login_hint: str, port: int = DRIVE_OAUTH_PORT, timeout_seconds: int = 180):
+    """Runs a threaded local OAuth callback server for Google Drive authorization."""
+    flow.redirect_uri = f"http://localhost:{port}/"
+    auth_kwargs = {"prompt": "consent", "access_type": "offline"}
+    if login_hint:
+        auth_kwargs["login_hint"] = login_hint
+    auth_url, _ = flow.authorization_url(**auth_kwargs)
+
+    received_event = threading.Event()
+    result = {"path": None, "error": None}
+    result_lock = threading.Lock()
+
+    class _CallbackHandler(BaseHTTPRequestHandler):
+        def setup(self):
+            self.request.settimeout(5.0)
+            super().setup()
+
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            if "code" in params or "error" in params:
+                with result_lock:
+                    if not received_event.is_set():
+                        result["path"] = self.path
+                        result["error"] = params.get("error", [None])[0]
+                        received_event.set()
+                msg = (
+                    "<html><body><h2>Google Drive authorization failed</h2>"
+                    "<p>Check the terminal for details.</p></body></html>"
+                    if result["error"]
+                    else "<html><body><h2>Google Drive authorization complete!</h2>"
+                    "<p>You may close this tab and return to the terminal.</p></body></html>"
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(msg)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(msg)
+            else:
+                self.send_response(204)
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+    server = _ReusableThreadingHTTPServer(("127.0.0.1", port), _CallbackHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        print("\n" + "=" * 68)
+        print("Google Drive Authorization Required (One-Time Setup)")
+        print("=" * 68)
+        print(f"1. Open this URL in your browser and sign in as: {login_hint}")
+        print(f"   {auth_url}")
+        print("2. Click 'Allow' — authorization will complete automatically.")
+        print("=" * 68 + "\n", flush=True)
+        if not received_event.wait(timeout=timeout_seconds):
+            raise TimeoutError(f"Timed out after {timeout_seconds}s waiting for Google Drive OAuth callback.")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    if result["error"]:
+        raise RuntimeError(f"Google Drive OAuth returned error: {result['error']}")
+
+    authorization_response = f"https://localhost:{port}{result['path']}"
+    flow.fetch_token(authorization_response=authorization_response)
+    return flow.credentials
+
+
+def get_drive_service(drive_account: str = DEFAULT_DRIVE_ACCOUNT):
+    """Authenticates and returns a Google Drive API v3 service using token_drive.json."""
+    try:
+        import google.auth.transport.requests
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise ImportError(
+            "Google Drive dependencies are missing on host Python. "
+            "Run: pip3 install google-api-python-client google-auth-oauthlib"
+        ) from exc
+
+    creds = None
+    if DRIVE_TOKEN_FILE.exists() and DRIVE_TOKEN_FILE.is_file() and DRIVE_TOKEN_FILE.stat().st_size > 0:
+        try:
+            creds = Credentials.from_authorized_user_file(str(DRIVE_TOKEN_FILE), DRIVE_SCOPES)
+        except Exception as exc:
+            print(f"[Drive Auth] Warning: could not load {DRIVE_TOKEN_FILE.name}: {exc}")
+            creds = None
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            print("[Drive Auth] Refreshing expired Google Drive access token...")
+            try:
+                creds.refresh(google.auth.transport.requests.Request())
+            except Exception as exc:
+                print(f"[Drive Auth] Stored refresh token invalid/revoked ({exc}); starting fresh login...")
+                creds = None
+
+        if not creds or not creds.valid:
+            if not DRIVE_CLIENT_SECRET_FILE.exists() or DRIVE_CLIENT_SECRET_FILE.stat().st_size == 0:
+                raise FileNotFoundError(
+                    f"Google OAuth client secret not found at: {DRIVE_CLIENT_SECRET_FILE}"
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(str(DRIVE_CLIENT_SECRET_FILE), DRIVE_SCOPES)
+            creds = _run_drive_oauth_server(flow, login_hint=drive_account)
+
+        DRIVE_TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
+        print(f"[Drive Auth] Saved credentials to {DRIVE_TOKEN_FILE.name} for future headless uploads.")
+
+    return build("drive", "v3", credentials=creds)
+
+
+def verify_drive_folder(drive, folder_id: str) -> str:
+    """Verifies Drive API access and target folder existence; returns folder name."""
+    from googleapiclient.errors import HttpError
+
+    try:
+        meta = drive.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType",
+            supportsAllDrives=True,
+        ).execute()
+    except HttpError as exc:
+        detail = str(exc)
+        if "accessNotConfigured" in detail or "has not been used" in detail:
+            raise RuntimeError(
+                "Google Drive API is not enabled on your Google Cloud project yet. "
+                "Enable it using the link in the error above, wait ~1 minute, and retry."
+            ) from exc
+        raise
+    return meta.get("name", folder_id)
+
+
+def upload_raw_to_drive(
+    raw_path: Path,
+    folder_id: str = DEFAULT_DRIVE_FOLDER_ID,
+    drive_account: str = DEFAULT_DRIVE_ACCOUNT,
+) -> str:
+    """Uploads raw audio clip to the target Google Drive folder using resumable chunked upload."""
+    from googleapiclient.http import MediaFileUpload
+
+    drive = get_drive_service(drive_account=drive_account)
+    folder_name = verify_drive_folder(drive, folder_id)
+
+    mime_type = mimetypes.guess_type(raw_path.name)[0] or "audio/mpeg"
+    size_mb = raw_path.stat().st_size / (1024 * 1024)
+    print(f"[Drive] Uploading {raw_path.name} ({size_mb:.1f} MB) -> Drive folder '{folder_name}'...")
+
+    body = {
+        "name": raw_path.name,
+        "parents": [folder_id],
+    }
+    media = MediaFileUpload(
+        str(raw_path),
+        mimetype=mime_type,
+        chunksize=10 * 1024 * 1024,
+        resumable=True,
+    )
+    request = drive.files().create(
+        body=body,
+        media_body=media,
+        fields="id,name,webViewLink",
+        supportsAllDrives=True,
+    )
+
+    response = None
+    last_pct = -1
+    while response is None:
+        status, response = request.next_chunk()
+        if status:
+            pct = int(status.progress() * 100)
+            if pct != last_pct:
+                print(f"        Uploaded: {pct}%")
+                last_pct = pct
+
+    file_id = response["id"]
+    link = response.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+    print(f"[Drive] Upload complete! {link}")
+    return link
+
+
 def handle_raw_file(raw_path: Path, delete_raw: bool = False):
     """Moves the raw input clip to inputs/raw_archive/ or deletes it when delete_raw=True."""
     if delete_raw:
@@ -578,6 +813,31 @@ def main():
         "--login-only",
         action="store_true",
         help="Open dedicated Microsoft Edge profile to sign into Adobe Podcast, then exit",
+    )
+    parser.add_argument(
+        "--drive-login-only",
+        action="store_true",
+        help="Complete one-time Google Drive OAuth login (icb.mail.info@gmail.com) and verify folder access",
+    )
+    parser.add_argument(
+        "--upload-raw-only",
+        action="store_true",
+        help="Only upload the specified/detected raw audio clip to Google Drive (skip Adobe Enhance)",
+    )
+    parser.add_argument(
+        "--skip-drive",
+        action="store_true",
+        help="Skip uploading the raw clip to Google Drive after enhancement",
+    )
+    parser.add_argument(
+        "--drive-folder-id",
+        default=DEFAULT_DRIVE_FOLDER_ID,
+        help=f"Target Google Drive folder ID for raw clip backup (default: {DEFAULT_DRIVE_FOLDER_ID})",
+    )
+    parser.add_argument(
+        "--drive-account",
+        default=DEFAULT_DRIVE_ACCOUNT,
+        help=f"Google account email hint for Drive upload (default: {DEFAULT_DRIVE_ACCOUNT})",
     )
     parser.add_argument(
         "--profile-dir",
@@ -619,7 +879,18 @@ def main():
         run_manual_edge_login(profile_dir)
         return
 
+    if args.drive_login_only:
+        drive = get_drive_service(drive_account=args.drive_account)
+        folder_name = verify_drive_folder(drive, args.drive_folder_id)
+        print(f"[Drive Auth] Verified access to Drive folder: '{folder_name}' ({args.drive_folder_id})")
+        return
+
     raw_path = resolve_raw_audio(args.input_audio)
+
+    if args.upload_raw_only:
+        upload_raw_to_drive(raw_path, folder_id=args.drive_folder_id, drive_account=args.drive_account)
+        return
+
     output_path = derive_output_path(raw_path, args.output)
 
     if output_path.exists() and not args.force:
@@ -630,10 +901,11 @@ def main():
     raw_duration = get_media_duration(raw_path)
     print("=" * 64)
     print("BUET Mosque Tafseer Audio Enhancement Plan:")
-    print(f"  • Raw input:   {raw_path.name} ({raw_duration / 60:.2f} min)")
-    print(f"  • Output MP3:  {output_path.name}")
-    print(f"  • Chunk cap:   {args.max_chunk_min:.2f} min")
-    print(f"  • Raw cleanup: {'DELETE (--delete-raw)' if args.delete_raw else 'Move to inputs/raw_archive/'}")
+    print(f"  • Raw input:    {raw_path.name} ({raw_duration / 60:.2f} min)")
+    print(f"  • Output MP3:   {output_path.name}")
+    print(f"  • Chunk cap:    {args.max_chunk_min:.2f} min")
+    print(f"  • Drive backup: {'SKIP (--skip-drive)' if args.skip_drive else f'{args.drive_account} -> folder {args.drive_folder_id}'}")
+    print(f"  • Raw cleanup:  {'DELETE (--delete-raw)' if args.delete_raw else 'Move to inputs/raw_archive/'}")
     print("=" * 64)
 
     temp_dir = OUTPUT_DIR / ".enhance_tmp"
@@ -651,6 +923,8 @@ def main():
         )
         join_and_save(enhanced_files, output_path)
         verify_output(output_path, expected_duration=raw_duration)
+        if not args.skip_drive:
+            upload_raw_to_drive(raw_path, folder_id=args.drive_folder_id, drive_account=args.drive_account)
         handle_raw_file(raw_path, delete_raw=args.delete_raw)
         print(f"\n[Done] Enhanced audio ready at: {output_path}")
     finally:
